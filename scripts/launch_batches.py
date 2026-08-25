@@ -54,20 +54,42 @@ RUNNER = Path(os.environ.get("OCODEX_RUNNER", "")) if os.environ.get("OCODEX_RUN
     else Path.home() / ".claude/skills/ocodex/scripts/run_agents.py"
 )
 ORSLOT = Path(os.environ.get("ORSLOT_BIN", str(Path.home() / "bin/orslot")))
+def parse_slot_pool(text: str) -> tuple[int, int]:
+    """Count only keys that still have remaining quota.
+
+    Spent/overdrawn keys must not inflate the concurrency cap. Four keys with
+    two spent is two live keys, not four. Pool totals ("today 1449/4000")
+    and the current-slot banner are ignored.
+    """
+    live: list[tuple[int, int]] = []
+    for line in text.splitlines():
+        low = line.lower()
+        if "overdrawn" in low or "spent" in low:
+            continue
+        stripped = line.strip()
+        if stripped.lower().startswith("today") or stripped.lower().startswith("slot "):
+            continue
+        match = re.match(r"^\s*\*?\s*\d+\s+.*?(\d+)/(\d+)(?:\s|$)", line)
+        if not match:
+            continue
+        used, cap = int(match.group(1)), int(match.group(2))
+        remaining = cap - used
+        if remaining > 0:
+            live.append((used, cap))
+    remaining = sum(cap - used for used, cap in live)
+    n_live = len(live)
+    return (n_live if n_live else 1), max(0, remaining)
+
+
 def slot_pool() -> tuple[int, int]:
-    """(number of keys, requests remaining today across the pool)."""
+    """(number of LIVE keys, requests remaining today across the pool)."""
     if not ORSLOT.exists():
         return 1, 10**9
     try:
         out = subprocess.run([str(ORSLOT)], capture_output=True, text=True, timeout=10).stdout
     except Exception:
         return 1, 1000
-    # used/cap may end the line (no trailing space), so \s is optional here.
-    keys = re.findall(r"^\s*\*?\s*\d+\s+.*?(\d+)/(\d+)(?:\s|$)", out, re.MULTILINE)
-    if not keys:
-        return 1, 1000
-    remaining = sum(int(cap) - int(used) for used, cap in keys)
-    return len(keys), max(0, remaining)
+    return parse_slot_pool(out)
 
 
 def poll_interval() -> float:
