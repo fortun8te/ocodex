@@ -136,7 +136,7 @@ def cmd_doctor() -> int:
     if orslot:
         print(f"OK    orslot     {orslot}  (multi-key pool)")
     else:
-        print("OPT   orslot     not found — 1 key, default 5 concurrent. Scale with `orslot add`.")
+        print("OPT   orslot     not found — 1 key, default 6 concurrent. Scale with `orslot add`.")
 
     docker = shutil.which("docker")
     if docker:
@@ -175,8 +175,8 @@ def cmd_doctor() -> int:
         print("MISS  sample     examples/sample-manifest.json")
 
     print()
-    print("default ~5 concurrent workers per OpenRouter key (override --workers-per-key 8, not 20).")
-    print("one supervisor is the quality gate. 429s backoff/hop; they are not a crash at 6.")
+    print("default ~6 concurrent workers per OpenRouter key (override --workers-per-key 8, not 20).")
+    print("one supervisor is the quality gate. 429s backoff/hop; they are not a crash at 7+.")
     print()
     print("Next:")
     dest = skill if (skill / "scripts/ocodex_managed.py").exists() else SKILL_DIR
@@ -207,6 +207,8 @@ def cmd_status(args) -> int:
                 return 0 if all_done.read_text(encoding="utf-8").strip() == "done" else 1
             time.sleep(interval)
             continue
+        if any(row["state"] == "STALE" for row in rows):
+            return 0  # informational; supervisor decides
         return 0
 
 
@@ -224,7 +226,7 @@ def cmd_run(args) -> int:
     keys, remaining = probe_pool()
     plan = plan_capacity(
         len(agents), keys, remaining,
-        workers_per_key=args.workers_per_key or 5,
+        workers_per_key=args.workers_per_key or 6,
         max_workers=args.max_workers or 0,
     )
     print(format_headroom(plan, estimate_requests(agents)))
@@ -290,7 +292,7 @@ def main() -> int:
     runp.add_argument("--facts", help="authoritative facts for workers + supervisor brief")
     runp.add_argument("--verify", help="real build/test commands for the supervisor brief")
     runp.add_argument("--off-limits", help="concurrent files the supervisor must not touch")
-    runp.add_argument("--workers-per-key", type=int, help="default 5; 8 is ok; do not default to 20")
+    runp.add_argument("--workers-per-key", type=int, help="default 6; 8 is ok; do not default to 20")
     runp.add_argument("--max-workers", type=int)
     runp.add_argument("--timeout", type=int)
     runp.add_argument("--no-wait", action="store_true")

@@ -3,18 +3,18 @@
 
 Takes ONE master manifest with any number of agents and:
   1. probes the orslot pool (keys x remaining budget) and caps concurrency
-     at slots * WORKERS_PER_KEY (default 5);
+     at slots * WORKERS_PER_KEY (default 6);
   2. validates required fields and disjoint owns across editing workers;
   3. writes ledger.json (start timestamp, ownership, chunk plan) and creates
      <out>/<name>.progress.md immediately;
   4. injects a STEP ZERO CHECKPOINT into every task;
-  5. chunks agents into sub-batches (<=5 each), launching them through the
+  5. chunks agents into sub-batches (<=6 each), launching them through the
      shared runner in waves that respect the concurrency cap;
   6. writes <out>/chunk-N.done markers and a final <out>/all.done.
 
 Usage:
   python3 launch_batches.py master-manifest.json --out-dir /path/out
-                            [--workers-per-key 5] [--max-workers N]
+                            [--workers-per-key 6] [--max-workers N]
                             [--timeout 900]
 """
 from __future__ import annotations
@@ -54,8 +54,6 @@ RUNNER = Path(os.environ.get("OCODEX_RUNNER", "")) if os.environ.get("OCODEX_RUN
     else Path.home() / ".claude/skills/ocodex/scripts/run_agents.py"
 )
 ORSLOT = Path(os.environ.get("ORSLOT_BIN", str(Path.home() / "bin/orslot")))
-
-
 def slot_pool() -> tuple[int, int]:
     """(number of keys, requests remaining today across the pool)."""
     if not ORSLOT.exists():
@@ -99,6 +97,8 @@ def main() -> int:
 
     out = Path(args.out_dir)
     out.mkdir(parents=True, exist_ok=True)
+    # A reused out dir carries stale done markers: all.done from the last run
+    # would wake the supervisor before this run does any work.
     stale = [p.name for p in out.glob("*.done")]
     if stale:
         print(f"refusing to run: {', '.join(sorted(stale))} already exist in {out} "
@@ -114,6 +114,7 @@ def main() -> int:
         print(str(exc), file=sys.stderr)
         return 2
 
+    # Keep original agent dicts (facts etc.) but use validated list as source of truth.
     master["agents"] = agents
     master["workdir"] = str(workdir)
 
@@ -127,7 +128,7 @@ def main() -> int:
     cap = plan["cap"]
     print(format_headroom(plan, est_need))
     if plan.get("over_recommend"):
-        print("NOTE: concurrency exceeds recommended keys*workers/key (default 5/key). "
+        print("NOTE: concurrency exceeds recommended keys*workers/key (default 6/key). "
               "429s backoff/hop via orslot; this is allowed, not a crash. Do not jump to 20.",
               file=sys.stderr)
 
@@ -164,6 +165,7 @@ def main() -> int:
         persist_ledger()
 
     def descendant_pids() -> list[int]:
+        """Pids whose cmdline mentions this out-dir (ocodex grandchildren included)."""
         needle = str(out).encode()
         me = os.getpid()
         found: list[int] = []
@@ -185,6 +187,8 @@ def main() -> int:
         return found
 
     def kill_all() -> None:
+        # Ctrl-C / kill of THIS launcher must not orphan runner children
+        # or their start_new_session ocodex grandchildren.
         for _, p in running:
             if p.poll() is None:
                 try:
