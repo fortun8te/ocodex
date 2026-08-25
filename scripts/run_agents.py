@@ -8,7 +8,6 @@ import concurrent.futures
 import json
 import os
 from pathlib import Path
-import re
 import shutil
 import signal
 import subprocess
@@ -17,115 +16,21 @@ import tempfile
 import time
 from typing import Any
 
-
-MAX_AGENTS = 6
-NAME_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$")
-
-
-def fail(message: str) -> None:
-    raise ValueError(message)
-
-
-def load_manifest(path: Path) -> dict[str, Any]:
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
-        fail(f"cannot read manifest: {exc}")
-    if not isinstance(data, dict):
-        fail("manifest must be a JSON object")
-    return data
+from harness_lib import (
+    MAX_AGENTS,
+    ManifestError,
+    append_stats,
+    classify_error,
+    compact_brief,
+    load_manifest,
+    merge_result_json,
+    seed_progress_files,
+    utc_now,
+    validate_manifest,
+)
 
 
-def validate(data: dict[str, Any], default_timeout: int) -> tuple[Path, list[dict[str, Any]]]:
-    raw_workdir = data.get("workdir")
-    if not isinstance(raw_workdir, str) or not raw_workdir:
-        fail("workdir must be a non-empty absolute path")
-    workdir = Path(raw_workdir).expanduser()
-    if not workdir.is_absolute() or not workdir.is_dir():
-        fail(f"workdir is not an existing absolute directory: {workdir}")
-
-    agents = data.get("agents")
-    if not isinstance(agents, list) or not agents:
-        fail("agents must be a non-empty list")
-    if len(agents) > MAX_AGENTS:
-        fail(f"at most {MAX_AGENTS} agents may run in one batch")
-
-    normalized: list[dict[str, Any]] = []
-    names: set[str] = set()
-    owned_paths: list[Path] = []
-    for index, raw in enumerate(agents):
-        if not isinstance(raw, dict):
-            fail(f"agent {index} must be an object")
-        name = raw.get("name")
-        task = raw.get("task")
-        mode = raw.get("mode", "scout")
-        if not isinstance(name, str) or not NAME_RE.fullmatch(name):
-            fail(f"agent {index} has an invalid name")
-        if name in names:
-            fail(f"duplicate agent name: {name}")
-        names.add(name)
-        if not isinstance(task, str) or not task.strip():
-            fail(f"agent {name} needs a non-empty task")
-        if mode not in {"scout", "worker"}:
-            fail(f"agent {name} mode must be scout or worker")
-
-        owns = raw.get("owns", [])
-        if not isinstance(owns, list) or not all(isinstance(item, str) and item for item in owns):
-            fail(f"agent {name} owns must be a list of paths")
-        if mode == "worker" and not owns:
-            fail(f"worker {name} needs at least one owned path")
-        for item in owns:
-            owned_path = (workdir / item).resolve() if not Path(item).is_absolute() else Path(item).resolve()
-            if not owned_path.is_relative_to(workdir.resolve()):
-                fail(f"worker ownership must stay inside workdir: {item}")
-            if any(
-                owned_path == previous
-                or owned_path.is_relative_to(previous)
-                or previous.is_relative_to(owned_path)
-                for previous in owned_paths
-            ):
-                fail(f"worker ownership overlaps at {item}")
-            owned_paths.append(owned_path)
-
-        timeout = raw.get("timeout", default_timeout)
-        if not isinstance(timeout, int) or timeout < 30:
-            fail(f"agent {name} timeout must be an integer of at least 30 seconds")
-        model = raw.get("model")
-        if model is not None and (not isinstance(model, str) or not model.strip()):
-            fail(f"agent {name} model must be a non-empty string")
-        effort = raw.get("effort")
-        if effort is not None and effort not in {"low", "medium", "high", "xhigh"}:
-            fail(f"agent {name} effort must be low, medium, high, or xhigh")
-        normalized.append({
-            "name": name,
-            "task": task.strip(),
-            "mode": mode,
-            "owns": owns,
-            "timeout": timeout,
-            "model": model,
-            "effort": effort,
-        })
-    return workdir.resolve(), normalized
-
-
-def build_prompt(agent: dict[str, Any], workdir: Path) -> str:
-    common = (
-        "You are an external ocodex worker reporting to a parent agent. "
-        "You have no access to the parent conversation, so use only this task and local evidence. "
-        "Do not spawn subagents or run codex/ocodex commands. Preserve unrelated user changes. "
-        "Do not mutate external systems unless the task explicitly requests and authorizes it. "
-        "For ordinary read-only shell calls, omit justification and sandbox_permissions. "
-        "Return a concise result with evidence, files inspected or changed, tests run, and any uncertainty."
-    )
-    if agent["mode"] == "scout":
-        boundary = "This is read-only. Do not edit files or mutate external systems."
-    else:
-        owned = ", ".join(agent["owns"])
-        boundary = (
-            f"You own only these paths: {owned}. Other workers may be editing elsewhere. "
-            "Do not edit outside your ownership or revert others' work."
-        )
-    return f"{common}\n\nWorking directory: {workdir}\n{boundary}\n\nTask:\n{agent['task']}"
+LIVE_PROCESSES: list[subprocess.Popen] = []
 
 
 def find_ocodex() -> str | None:
@@ -208,18 +113,61 @@ def terminate(process: subprocess.Popen[str]) -> None:
             pass
 
 
-def run_one(
+def _register(process: subprocess.Popen) -> None:
+    LIVE_PROCESSES.append(process)
+
+
+def _unregister(process: subprocess.Popen) -> None:
+    try:
+        LIVE_PROCESSES.remove(process)
+    except ValueError:
+        pass
+
+
+def kill_live_children() -> None:
+    for process in list(LIVE_PROCESSES):
+        if process.poll() is None:
+            terminate(process)
+        _unregister(process)
+
+
+def batch_out_dir(fallback: Path) -> Path:
+    raw = os.environ.get("OCODEX_BATCH_OUT")
+    if raw:
+        return Path(raw)
+    return fallback
+
+
+def build_prompt(agent: dict[str, Any], workdir: Path, out_dir: Path) -> str:
+    checkpoint_out = batch_out_dir(out_dir)
+    result_path = checkpoint_out / f"{agent['name']}.result.json"
+    return compact_brief(
+        agent,
+        workdir,
+        checkpoint_out=checkpoint_out,
+        result_path=result_path,
+    )
+
+
+def _run_attempt(
     agent: dict[str, Any],
     workdir: Path,
     out_dir: Path,
     default_model: str | None,
     ocodex_bin: str,
+    attempt: int,
 ) -> dict[str, Any]:
     name = agent["name"]
+    suffix = "" if attempt == 1 else f".retry{attempt}"
     final_file = out_dir / f"{name}.final.txt"
-    stdout_file = out_dir / f"{name}.stdout.log"
-    stderr_file = out_dir / f"{name}.stderr.log"
-    final_file.unlink(missing_ok=True)
+    stdout_file = out_dir / f"{name}.stdout{suffix}.log"
+    stderr_file = out_dir / f"{name}.stderr{suffix}.log"
+    if attempt == 1:
+        final_file.unlink(missing_ok=True)
+    else:
+        if final_file.exists():
+            final_file.replace(out_dir / f"{name}.final.attempt1.txt")
+        final_file.unlink(missing_ok=True)
     command = command_for(agent, workdir, final_file, default_model, ocodex_bin)
     started = time.monotonic()
     with stdout_file.open("w", encoding="utf-8") as stdout, stderr_file.open("w", encoding="utf-8") as stderr:
@@ -232,9 +180,10 @@ def run_one(
             start_new_session=True,
             env=subprocess_environment(),
         )
+        _register(process)
         assert process.stdin is not None
         try:
-            process.stdin.write(build_prompt(agent, workdir))
+            process.stdin.write(build_prompt(agent, workdir, out_dir))
         except BrokenPipeError:
             pass
         try:
@@ -246,31 +195,37 @@ def run_one(
         final_stable_since: float | None = None
         timed_out = False
         completed_from_final = False
-        while True:
-            return_code = process.poll()
-            if return_code is not None:
-                break
-            now = time.monotonic()
-            if final_file.exists() and final_file.stat().st_size:
-                stat = final_file.stat()
-                signature = (stat.st_size, stat.st_mtime_ns)
-                if signature != final_signature:
-                    final_signature = signature
-                    final_stable_since = now
-                elif final_stable_since is not None and now - final_stable_since >= 2:
-                    # This local ocodex can finish `-o` but linger in shutdown hooks.
-                    # The completed final file is the authoritative worker result.
-                    terminate(process)
-                    return_code = 0
-                    completed_from_final = True
+        return_code: int | None = None
+        try:
+            while True:
+                return_code = process.poll()
+                if return_code is not None:
                     break
-            if now >= deadline:
-                terminate(process)
-                return_code = process.returncode if process.returncode is not None else 124
-                timed_out = True
-                break
-            time.sleep(0.2)
+                now = time.monotonic()
+                if final_file.exists() and final_file.stat().st_size:
+                    stat = final_file.stat()
+                    signature = (stat.st_size, stat.st_mtime_ns)
+                    if signature != final_signature:
+                        final_signature = signature
+                        final_stable_since = now
+                    elif final_stable_since is not None and now - final_stable_since >= 2:
+                        terminate(process)
+                        return_code = 0
+                        completed_from_final = True
+                        break
+                if now >= deadline:
+                    terminate(process)
+                    return_code = process.returncode if process.returncode is not None else 124
+                    timed_out = True
+                    break
+                time.sleep(0.2)
+        finally:
+            _unregister(process)
     final_ok = final_file.exists() and bool(final_file.read_text(encoding="utf-8").strip())
+    stderr_text = ""
+    if stderr_file.exists():
+        stderr_text = stderr_file.read_text(encoding="utf-8")
+    error_class = classify_error(return_code, timed_out, final_ok, stderr_text)
     result = {
         "name": name,
         "mode": agent["mode"],
@@ -282,15 +237,79 @@ def run_one(
         "final_file": str(final_file),
         "stdout_file": str(stdout_file),
         "stderr_file": str(stderr_file),
+        "error_class": error_class,
+        "attempt": attempt,
     }
     if not result["ok"]:
         harmless = "/Users/michael/bin/ocodex:25: device not configured: /dev/tty"
         stderr_lines = [
-            line for line in stderr_file.read_text(encoding="utf-8").splitlines()
+            line for line in stderr_text.splitlines()
             if line.strip() and line.strip() != harmless
         ]
         result["error_tail"] = stderr_lines[-12:]
     return result
+
+
+def run_one(
+    agent: dict[str, Any],
+    workdir: Path,
+    out_dir: Path,
+    default_model: str | None,
+    ocodex_bin: str,
+) -> dict[str, Any]:
+    name = agent["name"]
+    checkpoint_out = batch_out_dir(out_dir)
+    seed_progress_files(checkpoint_out, [agent])
+
+    first = _run_attempt(agent, workdir, out_dir, default_model, ocodex_bin, 1)
+    attempts = [first]
+    retried = False
+    current = first
+    if not first["ok"]:
+        retried = True
+        second = _run_attempt(agent, workdir, out_dir, default_model, ocodex_bin, 2)
+        attempts.append(second)
+        current = second
+
+    total_seconds = round(sum(item["seconds"] for item in attempts), 2)
+    current = dict(current)
+    current["retries"] = 1 if retried else 0
+    current["attempts"] = len(attempts)
+    current["seconds"] = total_seconds
+    current["first_error_class"] = first.get("error_class") if retried else None
+    if current["ok"]:
+        current["error_class"] = None
+
+    stats_record = {
+        "ts": utc_now(),
+        "name": name,
+        "effort": agent.get("effort"),
+        "model": agent.get("model") or default_model,
+        "ok": current["ok"],
+        "return_code": current["return_code"],
+        "seconds": total_seconds,
+        "error_class": current.get("error_class") or current.get("first_error_class"),
+        "retries": current["retries"],
+        "attempt_codes": [item["return_code"] for item in attempts],
+        "attempt_error_class": [item.get("error_class") for item in attempts],
+        "slot": os.environ.get("OCODEX_KEY_SLOT") or os.environ.get("OPENROUTER_SLOT"),
+        "mode": agent.get("mode"),
+    }
+    append_stats(stats_record, out_dir / "stats.jsonl", checkpoint_out / "stats.jsonl")
+
+    result_path = checkpoint_out / f"{name}.result.json"
+    merge_result_json(result_path, agent=agent, result=current)
+    current["result_file"] = str(result_path)
+    return current
+
+
+def _install_signal_handlers() -> None:
+    def on_signal(signum, frame) -> None:
+        kill_live_children()
+        sys.exit(128 + int(signum) if isinstance(signum, int) else 1)
+
+    signal.signal(signal.SIGINT, on_signal)
+    signal.signal(signal.SIGTERM, on_signal)
 
 
 def main() -> int:
@@ -315,8 +334,8 @@ def main() -> int:
         return 2
 
     try:
-        workdir, agents = validate(load_manifest(args.manifest), args.timeout)
-    except ValueError as exc:
+        workdir, agents = validate_manifest(load_manifest(args.manifest), args.timeout)
+    except (ManifestError, ValueError) as exc:
         print(str(exc), file=sys.stderr)
         return 2
 
@@ -335,10 +354,16 @@ def main() -> int:
                 "name": agent["name"],
                 "mode": agent["mode"],
                 "command": command_for(agent, workdir, final_file, args.model, ocodex_bin),
+                "prompt_preview": compact_brief(
+                    agent, workdir,
+                    checkpoint_out=batch_out_dir(out_dir),
+                    result_path=batch_out_dir(out_dir) / f"{agent['name']}.result.json",
+                ),
             })
         print(json.dumps({"out_dir": str(out_dir), "dry_run": True, "agents": plan}, indent=2))
         return 0
 
+    _install_signal_handlers()
     worker_count = min(args.max_parallel, len(agents))
     with concurrent.futures.ThreadPoolExecutor(max_workers=worker_count) as pool:
         futures = [pool.submit(run_one, agent, workdir, out_dir, args.model, ocodex_bin) for agent in agents]
