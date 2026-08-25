@@ -22,8 +22,10 @@ from harness_lib import (
     append_stats,
     classify_error,
     compact_brief,
+    heartbeat_interval_sec,
     load_manifest,
     merge_result_json,
+    progress_is_stale,
     seed_progress_files,
     utc_now,
     validate_manifest,
@@ -138,7 +140,13 @@ def batch_out_dir(fallback: Path) -> Path:
     return fallback
 
 
-def build_prompt(agent: dict[str, Any], workdir: Path, out_dir: Path) -> str:
+def build_prompt(
+    agent: dict[str, Any],
+    workdir: Path,
+    out_dir: Path,
+    *,
+    resume: bool = False,
+) -> str:
     checkpoint_out = batch_out_dir(out_dir)
     result_path = checkpoint_out / f"{agent['name']}.result.json"
     return compact_brief(
@@ -146,6 +154,7 @@ def build_prompt(agent: dict[str, Any], workdir: Path, out_dir: Path) -> str:
         workdir,
         checkpoint_out=checkpoint_out,
         result_path=result_path,
+        resume=resume,
     )
 
 
@@ -165,6 +174,7 @@ def _run_attempt(
     if attempt == 1:
         final_file.unlink(missing_ok=True)
     else:
+        # Retry writes a fresh final; keep the failed first attempt aside.
         if final_file.exists():
             final_file.replace(out_dir / f"{name}.final.attempt1.txt")
         final_file.unlink(missing_ok=True)
@@ -183,7 +193,7 @@ def _run_attempt(
         _register(process)
         assert process.stdin is not None
         try:
-            process.stdin.write(build_prompt(agent, workdir, out_dir))
+            process.stdin.write(build_prompt(agent, workdir, out_dir, resume=attempt > 1))
         except BrokenPipeError:
             pass
         try:
@@ -194,8 +204,10 @@ def _run_attempt(
         final_signature: tuple[int, int] | None = None
         final_stable_since: float | None = None
         timed_out = False
+        stale_heartbeat = False
         completed_from_final = False
         return_code: int | None = None
+        progress_path = batch_out_dir(out_dir) / f"{name}.progress.md"
         try:
             while True:
                 return_code = process.poll()
@@ -209,6 +221,7 @@ def _run_attempt(
                         final_signature = signature
                         final_stable_since = now
                     elif final_stable_since is not None and now - final_stable_since >= 2:
+                        # This local ocodex can finish `-o` but linger in shutdown hooks.
                         terminate(process)
                         return_code = 0
                         completed_from_final = True
@@ -218,6 +231,14 @@ def _run_attempt(
                     return_code = process.returncode if process.returncode is not None else 124
                     timed_out = True
                     break
+                if (
+                    now - started > heartbeat_interval_sec()
+                    and progress_is_stale(progress_path)
+                ):
+                    terminate(process)
+                    return_code = process.returncode if process.returncode is not None else 124
+                    stale_heartbeat = True
+                    break
                 time.sleep(0.2)
         finally:
             _unregister(process)
@@ -225,13 +246,16 @@ def _run_attempt(
     stderr_text = ""
     if stderr_file.exists():
         stderr_text = stderr_file.read_text(encoding="utf-8")
-    error_class = classify_error(return_code, timed_out, final_ok, stderr_text)
+    error_class = classify_error(
+        return_code, timed_out, final_ok, stderr_text, stale_heartbeat=stale_heartbeat,
+    )
     result = {
         "name": name,
         "mode": agent["mode"],
-        "ok": return_code == 0 and final_ok and not timed_out,
+        "ok": return_code == 0 and final_ok and not timed_out and not stale_heartbeat,
         "return_code": return_code,
         "timed_out": timed_out,
+        "stale_heartbeat": stale_heartbeat,
         "terminated_after_final": completed_from_final,
         "seconds": round(time.monotonic() - started, 2),
         "final_file": str(final_file),
@@ -260,13 +284,21 @@ def run_one(
     name = agent["name"]
     checkpoint_out = batch_out_dir(out_dir)
     seed_progress_files(checkpoint_out, [agent])
+    result_path = checkpoint_out / f"{name}.result.json"
 
     first = _run_attempt(agent, workdir, out_dir, default_model, ocodex_bin, 1)
     attempts = [first]
     retried = False
     current = first
+    # Harness-level retry once for empty output / stream-fail / crash / stale heartbeat.
+    # The retry resumes from the existing checkpoint (seed_progress_files skips it).
     if not first["ok"]:
         retried = True
+        merge_result_json(
+            result_path,
+            agent=agent,
+            result={**first, "retries": 1, "retrying": True, "ok": False},
+        )
         second = _run_attempt(agent, workdir, out_dir, default_model, ocodex_bin, 2)
         attempts.append(second)
         current = second
@@ -277,6 +309,7 @@ def run_one(
     current["attempts"] = len(attempts)
     current["seconds"] = total_seconds
     current["first_error_class"] = first.get("error_class") if retried else None
+    current["retrying"] = False
     if current["ok"]:
         current["error_class"] = None
 
@@ -297,7 +330,6 @@ def run_one(
     }
     append_stats(stats_record, out_dir / "stats.jsonl", checkpoint_out / "stats.jsonl")
 
-    result_path = checkpoint_out / f"{name}.result.json"
     merge_result_json(result_path, agent=agent, result=current)
     current["result_file"] = str(result_path)
     return current
