@@ -1,0 +1,12 @@
+# SearXNG is a real install dependency. Workers cannot web-search without it.
+#   docker compose -f examples/searxng-compose.yml up -d
+#   export SEARXNG_URL=http://127.0.0.1:8080
+services:
+  searxng:
+    image: searxng/searxng:latest
+    container_name: ocodex-searxng
+    ports:
+      - "8080:8080"
+    restart: unless-stopped
+    environment:
+      - SEARXNG_BASE_URL=http://127.0.0.1:8080/
