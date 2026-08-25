@@ -22,6 +22,7 @@ import argparse
 import copy
 import json
 import re
+import signal
 import subprocess
 import sys
 import time
@@ -49,7 +50,8 @@ def slot_pool() -> tuple[int, int]:
         out = subprocess.run([str(ORSLOT)], capture_output=True, text=True, timeout=10).stdout
     except Exception:
         return 1, 1000
-    keys = re.findall(r"^\s*\*?\s*\d+\s+.*?(\d+)/(\d+)\s", out, re.MULTILINE)
+    # used/cap may end the line (no trailing space), so \s is optional here.
+    keys = re.findall(r"^\s*\*?\s*\d+\s+.*?(\d+)/(\d+)(?:\s|$)", out, re.MULTILINE)
     if not keys:
         return 1, 1000
     remaining = sum(int(cap) - int(used) for used, cap in keys)
@@ -74,6 +76,14 @@ def main() -> int:
 
     out = Path(args.out_dir)
     out.mkdir(parents=True, exist_ok=True)
+    # A reused out dir carries stale done markers: all.done from the last run
+    # would wake the supervisor before this run does any work.
+    stale = [p.name for p in out.glob("*.done")]
+    if stale:
+        print(f"refusing to run: {', '.join(sorted(stale))} already exist in {out} "
+              "(use a fresh out-dir or delete old markers)", file=sys.stderr)
+        return 2
+
     master = json.loads(Path(args.manifest).read_text())
     agents = master["agents"]
 
@@ -98,18 +108,51 @@ def main() -> int:
     chunks = [agents[i:i + chunk_size] for i in range(0, len(agents), chunk_size)]
     ledger = {"chunks": [], "out": str(out)}
     running: list[tuple[int, subprocess.Popen]] = []
+    logs: dict[int, object] = {}
+    failed_chunks: list[int] = []
     launched = 0
 
     def live_workers() -> int:
         return sum(len(chunks[i]) for i, p in running if p.poll() is None)
 
+    def kill_all() -> None:
+        # Ctrl-C / kill of THIS launcher must not orphan runner children.
+        for _, p in running:
+            if p.poll() is None:
+                try:
+                    os.killpg(p.pid, signal.SIGTERM)
+                except ProcessLookupError:
+                    pass
+                try:
+                    p.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    try:
+                        os.killpg(p.pid, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
+
+    def on_signal(signum, frame) -> None:
+        kill_all()
+        sys.exit(f"launch_batches killed by signal {signum}; runners terminated")
+
+    signal.signal(signal.SIGINT, on_signal)
+    signal.signal(signal.SIGTERM, on_signal)
+
     while launched < len(chunks) or running:
         # reap
         for i, p in running[:]:
-            if p.poll() is not None:
-                (out / f"chunk-{i}.done").write_text(str(p.returncode))
+            code = p.poll()
+            if code is not None:
+                log = logs.pop(i, None)
+                if log is not None:
+                    log.close()
+                (out / f"chunk-{i}.done").write_text(str(code))
                 running.remove((i, p))
-                print(f"chunk-{i} finished (exit {p.returncode})")
+                if code != 0:
+                    failed_chunks.append(i)
+                    print(f"chunk-{i} FAILED (exit {code}); see chunk-{i}.runner.log")
+                else:
+                    print(f"chunk-{i} finished")
         # launch within cap
         while launched < len(chunks) and live_workers() + len(chunks[launched]) <= cap:
             i = launched
@@ -118,9 +161,11 @@ def main() -> int:
             mpath = out / f"chunk-{i}.manifest.json"
             mpath.write_text(json.dumps(sub, indent=2))
             log = open(out / f"chunk-{i}.runner.log", "w")
+            logs[i] = log
             p = subprocess.Popen(
                 [sys.executable, str(RUNNER), str(mpath), "--out-dir", str(out / f"chunk-{i}")],
                 stdout=log, stderr=subprocess.STDOUT,
+                start_new_session=True,
             )
             running.append((i, p))
             ledger["chunks"].append({"chunk": i, "agents": [a["name"] for a in chunks[i]]})
@@ -129,9 +174,15 @@ def main() -> int:
             launched += 1
         time.sleep(5)
 
-    (out / "all.done").write_text("done")
-    print("all chunks complete")
-    return 0
+    # all.done still wakes the supervisor, but its content says which waves
+    # died so a nonzero runner exit isn't silently folded into success.
+    summary = "failed:" + ",".join(map(str, failed_chunks)) if failed_chunks else "done"
+    (out / "all.done").write_text(summary)
+    if failed_chunks:
+        print(f"all chunks complete WITH FAILURES ({summary}) — supervisor must finish those tasks")
+    else:
+        print("all chunks complete")
+    return 1 if failed_chunks else 0
 
 
 if __name__ == "__main__":

@@ -5,11 +5,11 @@
 Cheap OpenRouter-backed workers (via an `ocodex` CLI) fan out on decomposable
 work — doc sync, test authoring, bug hunts, mechanical fixes — while one paid
 supervisor agent audits every claim, prunes every dubious fix, and finishes
-the jobs of workers that die.
+the jobs of workers that die mid-run.
 
-The economics: **verification is cheaper than generation.** Free-but-fallible
-workers plus one strict auditor beat a fleet of expensive agents on any task
-whose output is cheap to verify.
+The economics are simple: **verification is cheaper than generation.** A fleet
+of free-but-fallible workers plus one strict auditor beats a fleet of
+expensive agents on any task whose output is cheap to verify.
 
 ## Field data (first day in production)
 
@@ -24,9 +24,17 @@ whose output is cheap to verify.
 git clone https://github.com/OWNER/ocodex-managed && cd ocodex-managed && ./install.sh
 ```
 
-Requirements: an `ocodex` CLI on PATH (Codex CLI pointed at OpenRouter, or
-any exec-style agent CLI). Optional: an `orslot` key-slot manager for
-multi-key pools (~5 concurrent workers per key).
+The script copies `SKILL.md`, `SUPERVISOR.md`, and the scripts into
+`~/.claude/skills/ocodex-managed` (and `~/.codex/skills/ocodex-managed` when a
+`.codex` home exists), so Claude Code can pick the whole system up as a skill.
+
+Requirements:
+
+- an `ocodex` CLI on PATH — Codex CLI pointed at OpenRouter, or any exec-style
+  agent CLI that takes a prompt on stdin. If it lives somewhere non-standard,
+  point `OCODEX_BIN` at it.
+- optional: an `orslot` key-slot manager for multi-key pools (~5 concurrent
+  workers per key). Without it, everything still works on a single key.
 
 ## Configure
 
@@ -40,7 +48,8 @@ multi-key pools (~5 concurrent workers per key).
 
 ## Use
 
-One manifest, any number of agents:
+Describe every agent in one manifest — scouts for read-only review, workers
+for edits under explicit file ownership:
 
 ```json
 { "workdir": "/path/to/repo",
@@ -50,6 +59,8 @@ One manifest, any number of agents:
     { "name": "fix-parser", "mode": "worker", "owns": ["src/parser.ts"],
       "task": "Fix only bugs with a stated failure scenario. No refactors." } ] }
 ```
+
+Launch:
 
 ```bash
 python3 scripts/launch_batches.py manifest.json --out-dir ./out

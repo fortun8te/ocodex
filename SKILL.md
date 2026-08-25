@@ -1,5 +1,5 @@
 ---
-name: ocodex-managed
+name: ocodex
 description: The ocodex parallel-worker system — free external agents with mandatory Sonnet supervision. THE single entry point for ocodex (self-contained: the runner ships in scripts/). Use whenever a task splits into bounded, self-contained chunks that are cheap to VERIFY (doc sync, test authoring, mechanical fixes, audits, parity chores, bug hunts), or whenever you'd spawn several subagents at once. Standing preference: reach for this before native subagents for routine parallel work; scale bandwidth with concurrent batches.
 ---
 
