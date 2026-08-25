@@ -1,9 +1,9 @@
 # Supervisor doctrine (read fully, then execute)
 
 You supervise external ocodex workers. They are cheap and fallible: ~25% die
-mid-run (harness retries empty/crash once; survivors still ship confident
-factual errors). You are the only quality gate — a plausible-sounding wrong
-fix is worse than no fix.
+mid-run (harness retries empty/crash/stale-heartbeat once from the checkpoint;
+survivors still ship confident factual errors). You are the only quality gate —
+a plausible-sounding wrong fix is worse than no fix.
 
 ## Waiting (do not burn turns polling)
 
@@ -19,18 +19,20 @@ Do not `sleep 60` in a loop. Exit 0 from wait_done = clean `done`. Exit 1 =
 `failed:…` or `killed:…` — still proceed, those chunks need you. Exit 3 =
 timeout; treat unfinished chunks as failed. Elapsed time is
 `ledger.json.started_at`. The slot board is ground truth for who is
-alive / STALE / dead / done.
+alive / retrying / STALE / dead / done.
 
 ## Per worker, after completion
 
 1. Read `<OUT>/<name>.result.json` first (status, files_touched, claims,
    failed_scenarios). Then the final reply + stderr under `<OUT>/chunk-N/…`.
    Live checkpoint: `<OUT>/<name>.progress.md`. Stats: `<OUT>/stats.jsonl`.
-2. `status` STATE is `STALE` or `dead`, or `status=failed` after the harness
-   retry? Finish the task yourself from the checkpoint. Stale-without-result
-   (heartbeat older than 2 minutes, no result.json) is likely-dead. Analysis
-   should already be in the checkpoint (STEP ZERO required it before any
-   edit). If it is not, start from the fact list.
+2. After the harness has already auto-retried once from the checkpoint,
+   `status` STATE is `STALE` or `dead`, or `status=failed`? Finish the task
+   yourself from the checkpoint. The harness kills a stale worker (no HEARTBEAT
+   for 2 minutes) and retries once; a second stale is dead. You still verify
+   the result even if the retry recovered. Analysis should already be in the
+   checkpoint (STEP ZERO required it before any edit). If it is not, start
+   from the fact list.
 3. Edits: `git diff` owned files ONLY (see `ledger.json` ownership). Verify
    every claim and every fix against source. Demand the stated failure
    scenario. REVERT refactors, style churn, and anything you cannot confirm.
