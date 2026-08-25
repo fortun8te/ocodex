@@ -52,96 +52,74 @@ batch that killed this worker, before any fix existed — see below.
 All four verified with `python3 -m py_compile scripts/launch_batches.py
 scripts/run_agents.py` (passes) and, for items 1–3, by re-tracing the
 diff against `scripts/run_agents.py`'s actual exit-code contract
-(`return 0 if summary["ok"] else 1`, line 349) and against this run's own
+(`return 0 if summary["ok"] else 1`) and against this run's own
 `chunk-0.done` / `all.done` contents.
 
 ## Not fixed — noted, not acted on
 
-5. **The ~40-requests-per-agent estimate** (`scripts/launch_batches.py`,
-   used for capacity hints; sourced from SKILL.md's "~40 requests is a
-   sane per-agent budget") is a labeled guess, not a bug. It doesn't
-   distinguish scout effort from worker effort, so it over-estimates
-   scout cost and under-estimates a `high`-effort worker's. Low
-   priority: getting it wrong just mis-sizes a wave, it doesn't corrupt
-   state. Worth revisiting only if capacity planning becomes a real
-   pain point.
+5. **The per-agent request estimate** is still a labeled guess. It now
+   distinguishes scout vs worker and effort tier in `harness_lib.REQUEST_GUESS`
+   so waves are less uniformly billed as 40, but the numbers were not
+   measured. Low priority: getting it wrong just mis-sizes a wave.
 
-## Roadmap — not yet attempted, ranked by expected impact
+## Done in the harness-power upgrade
 
-6. **No feedback loop on worker death rate.** ~25% of workers die, and
-   that number is treated as an accepted constant rather than
-   something the system learns from. This very batch is a (n=1, so
-   treat as anecdote, not evidence) data point where the `effort: high`
-   worker (`self-improve`) died and the default-effort worker
-   (`polish-and-market`) didn't — plausibly just noise, but currently
-   unknowable either way because nothing records it. Sketch: have
-   `run_agents.py` append one JSON line per agent
-   (`{name, effort, model, ok, return_code, seconds}`) to a persistent
-   `stats.jsonl` at the repo root (not the ephemeral out-dir), so
-   patterns across many batches — by effort tier, by task shape, by
-   time of day — become visible instead of anecdotal.
+6. **Feedback loop on worker death rate.** `run_agents.py` appends one JSON
+   line per agent to `{out-dir}/stats.jsonl` and, if set, `$OCODEX_STATS`
+   (e.g. `~/.ocodex/stats.jsonl` for cross-batch history). Fields: name,
+   effort, model, ok, return_code, seconds, error_class, retries. The
+   harness retries empty output / stream-fail / crash **once**, then
+   leaves it for the supervisor. Both attempts are recorded.
 
-7. **Checkpoint granularity is per work-session, not per sub-task.**
-   This worker's own checkpoint proves the problem: after implementing
-   four separate, independently-traceable fixes (A–D), it wrote one
-   checkpoint bullet — "fixes implemented and verified" — covering all
-   four, then died. Finishing from that checkpoint required re-reading
-   the whole diff to figure out which fix was which, instead of the
-   checkpoint just saying so. Sketch: the injected CHECKPOINT clause
-   should ask for one append per named sub-task or per file touched,
-   not one append per "session" of work — cheap to ask for, and it's
-   the difference between a supervisor resuming in seconds versus
-   doing diff archaeology.
+7. **Checkpoint granularity is per sub-task.** The injected CHECKPOINT
+   clause is STEP ZERO of the task (not an addendum). It requires one
+   append per named sub-task or per file touched, not one vague session
+   bullet.
 
-8. **Upfront analysis is one crash away from being lost.** This
-   worker's task packed in six candidates to "examine hard" before
-   touching any code. It happened to park its full A–G reasoning in
-   the checkpoint *before* starting edits — which is exactly why this
-   file could be finished from checkpoint alone instead of needing a
-   re-read of the source. That was worker discipline, not something
-   the harness required. Sketch: make "write your analysis into the
-   checkpoint before editing any owned file" an explicit numbered step
-   in the injected CHECKPOINT clause (SKILL.md / `launch_batches.py`'s
-   task-string injection), not left to individual workers to think of.
+8. **Upfront analysis is required before edits.** STEP ZERO tells the
+   worker to write analysis into the checkpoint BEFORE editing any owned
+   file. The harness also creates `<OUT>/<name>.progress.md` at launch
+   so a crash still leaves a file.
 
-9. **Nothing exercises the launcher's process-management paths.** The
-   signal handling, `killpg` behavior, and stale-marker refusal added
-   this batch are only verified by reading the diff and by
-   `py_compile` — nothing actually spawns a child, sends it a signal,
-   and asserts no orphan remains, because that's outside what either a
-   worker's sandbox or a supervisor should improvise ad hoc mid-review.
-   Sketch: a small `tests/` smoke test — spawn `launch_batches.py`
-   against a trivial one-agent manifest, `SIGTERM` it mid-run, assert
-   the child process is gone and `chunk-0.done` exists — would let
-   future changes to this file be verified mechanically instead of by
-   supervisor code-reading alone.
+9. **Launcher process-management is tested.** `tests/` spawns
+   `launch_batches.py` against a stub `OCODEX_BIN`, SIGTERMs mid-run,
+   and asserts children are gone and `chunk-*.done` exists. Also covers
+   stale-marker refusal, `all.done` failure signaling, disjoint-owns
+   rejection, checkpoint language, and retry-once.
 
-10. **Supervisor's 25-minute give-up threshold is memory, not state.**
-    SUPERVISOR.md says "give up after ~25 min," but that's tracked only
-    in the supervisor's own background-wait duration, not recorded
-    anywhere a second supervisor (or a watchdog) could check
-    independently. Sketch: have the launcher stamp a start timestamp
-    into `ledger.json` when it begins, so elapsed time is a fact on
-    disk rather than something inferred from wall-clock context.
+10. **Elapsed time is on disk.** `ledger.json` is written at launch with
+    `started_at`, ownership, and chunk plan, and updated as chunks
+    finish. `scripts/wait_done.py` prints elapsed seconds from that
+    stamp. Supervisor doctrine no longer treats 25 minutes as memory.
+
+Also shipped in that upgrade (beyond 6–10): compact worker briefs (no
+SKILL/SUPERVISOR dump into the prompt), `<name>.result.json` contract so
+the supervisor parses instead of skimming prose, launch-time disjoint
+`owns` validation, `scripts/ocodex_managed.py`, README clone URL fixed
+to `fortun8te/ocodex`, and `install.sh` copies every `scripts/*.py`.
 
 ## What this worker found awkward about its own harness
 
-- The CHECKPOINT clause is appended to the task prompt as an addendum,
-  competing for attention with the actual task rather than being
-  step zero. It worked here because this worker chose to front-load
-  its analysis into the checkpoint before editing — but that was a
-  judgment call the harness didn't force, and a differently-ordered
-  worker could just as easily have started editing first and died with
-  nothing durable but a partial diff.
-- The prompt has to be fully self-contained because there is no
-  mid-task check-in: a worker gets one shot to carry six named
-  investigation targets, a fix policy ("surgical fixes only, comments
-  in the file's voice"), a verification command, and a deliverable
-  spec, all without any ability to ask a clarifying question if the
-  candidates turn out to be non-bugs (see item 5 above — the worker had
-  to decide unilaterally that the ~40-estimate wasn't a confirmed bug
-  and just say so, with no way to check that judgment against anyone).
-- The sandbox can compile but can't fully exercise what it changed:
-  `python3 -m py_compile` proves the file parses, not that
-  `start_new_session=True` plus the signal handlers actually prevent an
-  orphaned process. That gap is real and is item 9 above.
+- The CHECKPOINT clause used to be appended as an addendum, competing
+  with the task. That is now STEP ZERO, with analysis-before-edit
+  required. Kept here so the original failure mode stays documented.
+- Prompts have to be self-contained because there is no mid-task
+  check-in. Compact briefs + a result.json footer are the mitigation;
+  workers still cannot ask a clarifying question.
+- The sandbox can compile but used to be unable to exercise process
+  isolation. Item 9's tests close that gap for the launcher paths.
+
+Also in this upgrade (management + observability):
+
+- `ocodex_managed.py` is the UX: `doctor`, `run` (goal or manifest), `status`,
+  `wait`. `run` prints a filled SUPERVISOR brief so the skill user does not
+  hand-write JSON + ledger + spawn prompt.
+- Live slot board (`status` / `scripts/ocodex-status`) reads ledger +
+  progress + result.json + stats.jsonl. No LLM.
+- Mandatory HEARTBEAT every 2 minutes in the checkpoint; `status` marks
+  STALE; supervisor treats stale-without-result as likely-dead.
+- `./install.sh` is a real doctor: ocodex, optional orslot, docker, SearXNG
+  (`SEARXNG_URL`, default http://127.0.0.1:8080). SearXNG is a real install
+  dependency for worker web search.
+- Default `--workers-per-key 6` is rate-limit headroom, not a crash. 8 is
+  allowed; 429s hop/backoff. Do not default to 20. OpenRouter daily request limits reset every day.

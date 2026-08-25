@@ -3,24 +3,26 @@
 
 Takes ONE master manifest with any number of agents and:
   1. probes the orslot pool (keys x remaining budget) and caps concurrency
-     at slots * WORKERS_PER_KEY (default 5);
-  2. injects a CHECKPOINT footer into every task so a crashed worker leaves
-     its partial progress behind in <out>/<name>.progress.md;
-  3. chunks agents into sub-batches (<=5 each, ownership kept intact —
-     agents are never split from their files), launching them through the
+     at slots * WORKERS_PER_KEY (default 6);
+  2. validates required fields and disjoint owns across editing workers;
+  3. writes ledger.json (start timestamp, ownership, chunk plan) and creates
+     <out>/<name>.progress.md immediately;
+  4. injects a STEP ZERO CHECKPOINT into every task;
+  5. chunks agents into sub-batches (<=6 each), launching them through the
      shared runner in waves that respect the concurrency cap;
-  4. writes <out>/chunk-N.done markers and a final <out>/all.done, so a
-     supervisor watches exactly one file instead of polling folder listings.
+  6. writes <out>/chunk-N.done markers and a final <out>/all.done.
 
 Usage:
   python3 launch_batches.py master-manifest.json --out-dir /path/out
-                            [--workers-per-key 5] [--max-workers N]
+                            [--workers-per-key 6] [--max-workers N]
+                            [--timeout 900]
 """
 from __future__ import annotations
 
 import argparse
 import copy
 import json
+import os
 import re
 import signal
 import subprocess
@@ -28,23 +30,33 @@ import sys
 import time
 from pathlib import Path
 
-import os
+from harness_lib import (
+    DEFAULT_WORKERS_PER_KEY,
+    RUNNER_BATCH_CAP,
+    ManifestError,
+    checkpoint_clause,
+    estimate_requests,
+    format_headroom,
+    load_manifest,
+    new_ledger,
+    plan_capacity,
+    seed_progress_files,
+    update_ledger_chunk,
+    utc_now,
+    validate_manifest,
+    write_json,
+)
 
 SKILL_DIR = Path(__file__).resolve().parent
 RUNNER = Path(os.environ.get("OCODEX_RUNNER", "")) if os.environ.get("OCODEX_RUNNER") else (
     SKILL_DIR / "run_agents.py"
     if (SKILL_DIR / "run_agents.py").exists()
-    else Path.home() / ".claude/skills/ocodex-subagents/scripts/run_agents.py"
+    else Path.home() / ".claude/skills/ocodex/scripts/run_agents.py"
 )
 ORSLOT = Path(os.environ.get("ORSLOT_BIN", str(Path.home() / "bin/orslot")))
-RUNNER_BATCH_CAP = 5          # agents per runner invocation
-DEFAULT_WORKERS_PER_KEY = 5
-
-
 def slot_pool() -> tuple[int, int]:
     """(number of keys, requests remaining today across the pool)."""
     if not ORSLOT.exists():
-        # No slot manager: assume one key; the provider enforces its own caps.
         return 1, 10**9
     try:
         out = subprocess.run([str(ORSLOT)], capture_output=True, text=True, timeout=10).stdout
@@ -58,12 +70,20 @@ def slot_pool() -> tuple[int, int]:
     return len(keys), max(0, remaining)
 
 
-CHECKPOINT = (
-    "\n\nCHECKPOINT (mandatory): create {out}/{name}.progress.md IMMEDIATELY "
-    "and append to it after every significant step — findings so far, files "
-    "changed, next intended step. If your process dies, that file is the only "
-    "thing that survives; a supervisor will finish your task from it."
-)
+def poll_interval() -> float:
+    raw = os.environ.get("OCODEX_POLL_INTERVAL", "5")
+    try:
+        return max(0.05, float(raw))
+    except ValueError:
+        return 5.0
+
+
+def inject_checkpoint(agent: dict, out: Path) -> None:
+    clause = checkpoint_clause(out, agent["name"])
+    task = agent.get("task") or ""
+    if "STEP ZERO" in task:
+        return
+    agent["task"] = clause + "\n\n" + task
 
 
 def main() -> int:
@@ -72,6 +92,7 @@ def main() -> int:
     ap.add_argument("--out-dir", required=True)
     ap.add_argument("--workers-per-key", type=int, default=DEFAULT_WORKERS_PER_KEY)
     ap.add_argument("--max-workers", type=int, default=0)
+    ap.add_argument("--timeout", type=int, default=900)
     args = ap.parse_args()
 
     out = Path(args.out_dir)
@@ -84,76 +105,154 @@ def main() -> int:
               "(use a fresh out-dir or delete old markers)", file=sys.stderr)
         return 2
 
-    master = json.loads(Path(args.manifest).read_text())
-    agents = master["agents"]
+    try:
+        master = load_manifest(Path(args.manifest))
+        workdir, agents = validate_manifest(
+            master, args.timeout, max_agents=None, require_workdir=True,
+        )
+    except ManifestError as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+
+    # Keep original agent dicts (facts etc.) but use validated list as source of truth.
+    master["agents"] = agents
+    master["workdir"] = str(workdir)
 
     keys, remaining = slot_pool()
-    cap = keys * args.workers_per_key
-    if args.max_workers:
-        cap = min(cap, args.max_workers)
-    # ~40 requests is a sane per-agent budget guess; refuse to strand a batch
-    est_need = len(agents) * 40
-    print(f"pool: {keys} keys, ~{remaining} requests left today; "
-          f"concurrency cap {cap}; {len(agents)} agents (~{est_need} reqs est.)")
-    if remaining < est_need:
-        print("WARNING: pool may run dry mid-batch — consider fewer agents "
-              "or `orslot add` more keys.", file=sys.stderr)
+    est_need = estimate_requests(agents)
+    plan = plan_capacity(
+        len(agents), keys, remaining,
+        workers_per_key=args.workers_per_key,
+        max_workers=args.max_workers,
+    )
+    cap = plan["cap"]
+    print(format_headroom(plan, est_need))
+    if plan.get("over_recommend"):
+        print("NOTE: concurrency exceeds recommended keys*workers/key (default 6/key). "
+              "429s backoff/hop via orslot; this is allowed, not a crash. Do not jump to 20.",
+              file=sys.stderr)
 
     for agent in agents:
-        agent["task"] += CHECKPOINT.format(out=out, name=agent["name"])
+        inject_checkpoint(agent, out)
+    seed_progress_files(out, agents)
 
-    # Chunks must fit under the concurrency cap or the wave loop deadlocks
-    # waiting for room that can never exist.
-    chunk_size = max(1, min(RUNNER_BATCH_CAP, cap))
+    chunk_size = plan["chunk_size"]
     chunks = [agents[i:i + chunk_size] for i in range(0, len(agents), chunk_size)]
-    ledger = {"chunks": [], "out": str(out)}
+    ledger = new_ledger(out=out, workdir=workdir, agents=agents, chunks=chunks)
+    ledger["headroom"] = plan
+    write_json(out / "ledger.json", ledger)
     running: list[tuple[int, subprocess.Popen]] = []
     logs: dict[int, object] = {}
     failed_chunks: list[int] = []
     launched = 0
+    child_env = os.environ.copy()
+    child_env["OCODEX_BATCH_OUT"] = str(out)
+    child_env["OCODEX_STATS"] = child_env.get("OCODEX_STATS") or str(out / "stats.jsonl")
 
     def live_workers() -> int:
         return sum(len(chunks[i]) for i, p in running if p.poll() is None)
 
+    def persist_ledger() -> None:
+        write_json(out / "ledger.json", ledger)
+
+    def mark_chunk(index: int, code: int | None, status: str) -> None:
+        marker = out / f"chunk-{index}.done"
+        if code is None:
+            marker.write_text("killed")
+        else:
+            marker.write_text(str(code))
+        update_ledger_chunk(ledger, index, status=status, exit_code=code)
+        persist_ledger()
+
+    def descendant_pids() -> list[int]:
+        """Pids whose cmdline mentions this out-dir (ocodex grandchildren included)."""
+        needle = str(out).encode()
+        me = os.getpid()
+        found: list[int] = []
+        proc = Path("/proc")
+        if not proc.exists():
+            return found
+        for entry in proc.iterdir():
+            if not entry.name.isdigit():
+                continue
+            pid = int(entry.name)
+            if pid == me:
+                continue
+            try:
+                cmd = (entry / "cmdline").read_bytes()
+            except (OSError, PermissionError):
+                continue
+            if needle in cmd:
+                found.append(pid)
+        return found
+
     def kill_all() -> None:
-        # Ctrl-C / kill of THIS launcher must not orphan runner children.
+        # Ctrl-C / kill of THIS launcher must not orphan runner children
+        # or their start_new_session ocodex grandchildren.
         for _, p in running:
             if p.poll() is None:
                 try:
                     os.killpg(p.pid, signal.SIGTERM)
                 except ProcessLookupError:
                     pass
+        for pid in descendant_pids():
+            try:
+                os.kill(pid, signal.SIGTERM)
+            except ProcessLookupError:
+                pass
+        deadline = time.time() + 5
+        for _, p in running:
+            if p.poll() is None:
+                remaining = max(0.05, deadline - time.time())
                 try:
-                    p.wait(timeout=5)
+                    p.wait(timeout=remaining)
                 except subprocess.TimeoutExpired:
                     try:
                         os.killpg(p.pid, signal.SIGKILL)
                     except ProcessLookupError:
                         pass
+        for pid in descendant_pids():
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
 
     def on_signal(signum, frame) -> None:
         kill_all()
-        sys.exit(f"launch_batches killed by signal {signum}; runners terminated")
+        for log in list(logs.values()):
+            try:
+                log.close()
+            except Exception:
+                pass
+        for i, p in running:
+            code = p.poll()
+            if not (out / f"chunk-{i}.done").exists():
+                mark_chunk(i, code if code is not None else 128 + int(signum), "killed")
+        ledger["killed_by"] = signum
+        ledger["finished_at"] = utc_now()
+        persist_ledger()
+        (out / "all.done").write_text(f"killed:{signum}")
+        sys.exit(128 + int(signum) if isinstance(signum, int) else 1)
 
     signal.signal(signal.SIGINT, on_signal)
     signal.signal(signal.SIGTERM, on_signal)
 
+    interval = poll_interval()
     while launched < len(chunks) or running:
-        # reap
         for i, p in running[:]:
             code = p.poll()
             if code is not None:
                 log = logs.pop(i, None)
                 if log is not None:
                     log.close()
-                (out / f"chunk-{i}.done").write_text(str(code))
                 running.remove((i, p))
                 if code != 0:
                     failed_chunks.append(i)
+                    mark_chunk(i, code, "failed")
                     print(f"chunk-{i} FAILED (exit {code}); see chunk-{i}.runner.log")
                 else:
+                    mark_chunk(i, code, "ok")
                     print(f"chunk-{i} finished")
-        # launch within cap
         while launched < len(chunks) and live_workers() + len(chunks[launched]) <= cap:
             i = launched
             sub = copy.deepcopy(master)
@@ -162,20 +261,22 @@ def main() -> int:
             mpath.write_text(json.dumps(sub, indent=2))
             log = open(out / f"chunk-{i}.runner.log", "w")
             logs[i] = log
+            cmd = [sys.executable, str(RUNNER), str(mpath), "--out-dir", str(out / f"chunk-{i}")]
+            if args.timeout:
+                cmd.extend(["--timeout", str(args.timeout)])
             p = subprocess.Popen(
-                [sys.executable, str(RUNNER), str(mpath), "--out-dir", str(out / f"chunk-{i}")],
+                cmd,
                 stdout=log, stderr=subprocess.STDOUT,
                 start_new_session=True,
+                env=child_env,
             )
             running.append((i, p))
-            ledger["chunks"].append({"chunk": i, "agents": [a["name"] for a in chunks[i]]})
-            (out / "ledger.json").write_text(json.dumps(ledger, indent=2))
             print(f"chunk-{i} launched ({len(chunks[i])} agents)")
             launched += 1
-        time.sleep(5)
+        time.sleep(interval)
 
-    # all.done still wakes the supervisor, but its content says which waves
-    # died so a nonzero runner exit isn't silently folded into success.
+    ledger["finished_at"] = utc_now()
+    persist_ledger()
     summary = "failed:" + ",".join(map(str, failed_chunks)) if failed_chunks else "done"
     (out / "all.done").write_text(summary)
     if failed_chunks:

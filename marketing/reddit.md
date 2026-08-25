@@ -25,13 +25,14 @@ The interesting part isn't the crash rate — it's that crashes aren't the dange
 
 The economics: verification is cheaper than generation. Free workers do the typing; one strong model does the checking; the composite ships zero errors where either alone would ship some.
 
-Tooling is two Python scripts:
+Tooling is the managed harness:
 
-- `run_agents.py` — runs up to 6 agents per batch, enforces non-overlapping file ownership between editing workers, supports dry-run.
-- `launch_batches.py` — takes one manifest with any number of agents, probes your key pool (optional orslot multi-key), injects crash checkpoints into every task, chunks into waves under the concurrency cap.
+- `ocodex_managed.py` — doctor, run, launch, status, wait. Status is a live slot board (no LLM).
+- `run_agents.py` — compact worker briefs, retry-once, stats.jsonl, result.json.
+- `launch_batches.py` — takes one manifest with any number of agents, probes your key pool (optional orslot multi-key), injects STEP ZERO checkpoints + heartbeats into every task, chunks into waves under the concurrency cap.
 
 Repo with full docs and the measured failure modes:
-https://github.com/fortun8te/ocodex-managed
+https://github.com/fortun8te/ocodex
 
 Happy to share more details about which tasks worked well (bug hunts and doc sync were great) and which didn't (anything needing real build/test loops — worker sandboxes can't run them).
 
@@ -48,13 +49,13 @@ I built a Claude Code skill that gives me a fleet of free OpenRouter workers plu
 Claude Code subagents cost tokens. Sometimes you just need ten things checked or fixed at once and don't care who does the typing. This skill points cheap free OpenRouter agents at your repo instead, then uses one paid Claude supervisor to make sure nothing bad survives.
 
 Repo (installs as a skill via install.sh):
-https://github.com/fortun8te/ocodex-managed
+https://github.com/fortun8te/ocodex
 
 How it fits into a Claude Code workflow:
 
-1. You write one JSON manifest describing any number of agents — read-only scouts for bug hunts, editing workers with explicit file ownership lists.
-2. `scripts/launch_batches.py` probes your OpenRouter key pool, chunks agents into waves under the concurrency cap (~5 workers per key), injects a crash-checkpoint clause so dead workers leave `<name>.progress.md` behind, and writes an all.done file when finished.
-3. You spawn one Claude supervisor per batch with SUPERVISOR.md as its doctrine. It waits on all.done, reads each worker's final reply, diffs only the owned files, verifies every fix against actual source, reverts anything it can't confirm, finishes crashed jobs from checkpoints, and runs the real build/tests itself (worker sandboxes can't).
+1. You write one JSON manifest describing any number of agents — read-only scouts for bug hunts, editing workers with explicit file ownership lists. Or skip JSON: `ocodex_managed.py run "Fix parser errors" --owns src/parser.ts`.
+2. `ocodex_managed.py run` probes your OpenRouter key pool, chunks agents into waves under the concurrency cap (~5 workers per key), injects a STEP ZERO crash-checkpoint + 2-minute heartbeat so dead workers leave `<name>.progress.md` behind, and writes an all.done file when finished.
+3. You spawn one Claude supervisor per batch with the printed SUPERVISOR brief. It waits on all.done, reads each worker's result.json, diffs only the owned files, verifies every fix against actual source, reverts anything it can't confirm, finishes crashed jobs from checkpoints, and runs the real build/tests itself (worker sandboxes can't).
 
 Real first-day numbers: 4 batches, 11 workers, ~25% died mid-run from provider stream errors, one "successful" batch shipped 8 confident factual errors, supervisor caught all 8 and finished 2 dead workers' tasks itself. Net errors to the repo: zero.
 
