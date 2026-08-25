@@ -417,8 +417,8 @@ def merge_result_json(
     return payload
 
 
-DEFAULT_WORKERS_PER_KEY = 5
-RUNNER_BATCH_CAP = 5
+DEFAULT_WORKERS_PER_KEY = 6
+RUNNER_BATCH_CAP = 6
 
 
 def slug_name(text: str, fallback: str = "worker") -> str:
@@ -475,7 +475,7 @@ def plan_capacity(
     max_workers: int = 0,
     runner_batch_cap: int = RUNNER_BATCH_CAP,
 ) -> dict[str, Any]:
-    """Pool-aware concurrency. Ceiling is keys * ~5, not 'spawn more workers'."""
+    """Pool-aware concurrency. Ceiling is keys * ~6, not 'spawn more workers'."""
     keys = max(1, int(keys))
     workers_per_key = max(1, int(workers_per_key))
     recommended = keys * workers_per_key
@@ -484,7 +484,7 @@ def plan_capacity(
     if max_workers:
         cap = max(1, int(max_workers))
         over_recommend = cap > recommended
-    # 5/key is rate-limit headroom, not a crash ceiling. Honour explicit caps.
+    # 6/key is rate-limit headroom, not a crash ceiling. Honour explicit caps.
     chunk_size = max(1, min(runner_batch_cap, cap))
     waves = (n_agents + chunk_size - 1) // chunk_size if n_agents else 0
     unused = max(0, cap - min(n_agents, cap))
@@ -510,15 +510,15 @@ def format_headroom(plan: dict[str, Any], est_need: int) -> str:
         "headroom:",
         f"  keys:              {plan['keys']}",
         f"  workers/key:       {plan['workers_per_key']}  (OpenRouter slot-pool rule of thumb)",
-        f"  pool recommended:  {plan['pool_cap']}  (keys * workers/key; default 5/key is rate-limit headroom, not a crash)",
+        f"  pool recommended:  {plan['pool_cap']}  (keys * workers/key; default 6/key is rate-limit headroom, not a crash)",
         f"  concurrency cap:   {plan['cap']}"
         + ("  [over recommended — 429s backoff/hop; allowed, not a crash]" if plan.get("over_recommend") else ""),
         f"  agents in batch:   {plan['agents']}",
         f"  waves:             {plan['waves']}  (packing, not extra parallelism)",
         f"  unused slots now:  {plan['unused_slots']}",
         f"  reqs est:          ~{est_need}  (labeled guess, not measured)",
-        f"  requests left:     ~{plan['remaining']}",
-        "ceiling: default ~5 concurrent workers per OpenRouter key (override --workers-per-key 8, not 20).",
+        f"  requests left:     ~{plan['remaining']}  (today; OpenRouter resets daily)",
+        "ceiling: default ~6 concurrent workers per OpenRouter key (override --workers-per-key 8, not 20).",
         "quality gate: one supervisor. scaling: more keys via orslot, or pack waves. 429 is a hop, not a crash.",
     ]
     if plan["agents"] > plan["cap"]:
