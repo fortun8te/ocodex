@@ -1,0 +1,26 @@
+{
+  "providers": [
+    {
+      "name": "openrouter",
+      "base_url": "https://openrouter.ai/api/v1",
+      "key_env": "OPENROUTER_API_KEY",
+      "conc_limit": 6,
+      "models": {
+        "cheap": ["deepseek/deepseek-chat-v3.1:free", "qwen/qwen3-coder:free"],
+        "std": ["qwen/qwen3-coder:free", "deepseek/deepseek-chat-v3.1:free"],
+        "max": []
+      }
+    },
+    {
+      "name": "groq",
+      "base_url": "https://api.groq.com/openai/v1",
+      "key_env": "GROQ_API_KEY",
+      "conc_limit": 8,
+      "models": {
+        "cheap": ["llama-3.3-70b-versatile"],
+        "std": ["llama-3.3-70b-versatile"],
+        "max": ["openai/gpt-oss-120b"]
+      }
+    }
+  ]
+}

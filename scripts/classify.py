@@ -25,6 +25,8 @@ TRANSIENT_NEEDLES = (
     "econnreset",
     "error sending",
     "stream closed",
+    "stream disconnect",
+    "disconnect",
     "socket hang up",
     "status 429",
     "status 502",

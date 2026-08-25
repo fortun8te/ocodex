@@ -1,122 +1,134 @@
 ---
 name: ocodex
-description: "/ocodex <goal> — run any decomposable task on a fleet of free supervised parallel agents. Entry point for every harness (Claude Code, Codex, Grok, Cursor, desktop). Use for bug hunts, doc sync, test authoring, audits, mechanical fixes, parity chores — anything that splits into bounded chunks that are cheap to VERIFY — or whenever several subagents would be spawned at once."
+description: The ocodex parallel-worker system — cheap external agents with mandatory paid supervision. Self-contained: doctor, run, status, wait_done, and ledger ship in scripts/. Use whenever a task splits into bounded chunks that are cheap to VERIFY (doc sync, test authoring, mechanical fixes, audits, parity chores, bug hunts), or whenever you'd spawn several subagents at once. Standing preference: reach for this before native subagents for routine parallel work.
 ---
 
-# /ocodex — free supervised agent fleet, one command
+# Ocodex, managed
 
-Take the user's goal and run the whole pipeline: decompose → launch → supervise
-→ integrate. Workers are free and fallible (~25% die; survivors ship confident
-errors); the supervisor is the only quality gate. Never run unsupervised.
+Cheap OpenRouter-backed workers + one paid supervisor per batch. Never run
+unsupervised. The harness retries empty/crash/stale-heartbeat once from the existing
+checkpoint (does not start over), checkpoints as STEP ZERO (with a heartbeat
+every 2 minutes), and writes ledger/stats/result files so the supervisor
+does not reconstruct the run from prose.
 
-Scripts live in `scripts/` beside this SKILL.md. Locate them from this file —
-harnesses load the same copy via symlink. Never hardcode a product home.
+Power is not "spawn more workers". Default ~6 concurrent per OpenRouter key.
+`--workers-per-key 8` is allowed (429s hop/backoff, not a crash). Do not
+default to 20. One supervisor is the quality gate. Scale with `orslot add`.
 
-## 1 · Place the work first
+## The three rules
 
-- Cheap to verify (facts checkable, tests runnable, diffs reviewable) → workers.
-- Verification costs as much as generation (taste, design, tricky concurrency) →
-  a strong native agent instead. Wrong-once-unacceptable (hardware, destructive,
-  live-state) → do it yourself. Free tilts this boundary; it never removes it.
+1. **Never unsupervised.** Workers are the hands; the supervisor is the only quality gate.
+2. **Disjoint ownership.** Every editing worker owns an explicit file list; nothing overlaps.
+3. **Place by verifiability.** Cheap-to-verify → workers. Expensive-to-verify (taste, concurrency) → a strong agent. Wrong-once-unacceptable → yourself.
 
-## 2 · Decompose
+## What you run (management layer)
 
-- **scouts** (read-only, `"effort": "high"` for real review) for danger zones —
-  concurrency, protocols, delivery pipelines. Demand CONFIRMED (traced path)
-  vs PLAUSIBLE, with file:line + trigger + consequence.
-- **workers** (edit) only with disjoint `owns` lists, only where every fix can
-  state a concrete failure scenario. Ban refactors/style churn explicitly.
-  Do not assign two workers the same browser, desktop, app, branch, or other
-  mutable external system.
-- Prompts are fully self-contained (workers see no conversation): goal, paths,
-  authoritative facts, output shape, stopping point — and tell them **the
-  working tree is truth; the brief is context**. Do not ask a worker to spawn
-  more agents or run `codex`/`ocodex`. Never include secrets.
-- Before launching, write the **ownership ledger**: files owned by you and by
-  every live batch; the new `owns` lists must not collide with any of it.
-
-## 3 · Launch
-
-Write a master manifest (outside the repo when practical):
-
-```json
-{
-  "workdir": "/absolute/path/to/project",
-  "agents": [
-    {
-      "name": "trace-auth",
-      "mode": "scout",
-      "effort": "high",
-      "task": "Find where login tokens are refreshed. Return file:line and likely failure points. Do not edit."
-    },
-    {
-      "name": "fix-parser",
-      "mode": "worker",
-      "owns": ["src/parser.ts", "tests/parser.test.ts"],
-      "after": ["trace-auth"],
-      "task": "Fix the confirmed empty-input parser bug and add focused tests. Run only the relevant tests."
-    }
-  ]
-}
-```
+Do **not** hand-write JSON, an ownership ledger, and a supervisor brief.
+Call this, in order:
 
 ```bash
-OUT=<scratch>/ocodex-<name>; mkdir -p $OUT
-python3 <this-skill>/scripts/launch_batches.py $OUT/master.json --out-dir $OUT  # background
-python3 <this-skill>/scripts/fleet_watch.py $OUT                                # other pane, or --once
+python3 ~/.claude/skills/ocodex/scripts/ocodex_managed.py doctor
+python3 ~/.claude/skills/ocodex/scripts/ocodex_managed.py run $OUT/master.json --out-dir $OUT
+# or:  ... run "Fix parser errors" --workdir /repo --owns src/parser.ts --out-dir $OUT
+python3 ~/.claude/skills/ocodex/scripts/ocodex_managed.py status $OUT
 ```
 
-Launcher flags: `--out-dir` (required), `--max-workers N`, `--workers-per-key N`,
-`--context-pack` (build and inject a commit-versioned CONTEXT.md), `--watch` /
-`--no-watch` (live table on a tty; default on when stdout is a tty).
+`run` validates disjoint owns, writes `ledger.json`, prints pool headroom,
+prints a filled SUPERVISOR brief, launches waves, waits on `all.done`.
+Then spawn **one** supervisor with that printed brief
+(`$OUT/supervisor-brief.md`). Watch the slot board instead of `sleep 60`.
 
-The launcher calls the sibling runner (`scripts/run_agents.py`); runner flags:
-`--out-dir`, `--max-parallel N` (≤6), `--model SLUG`, `--timeout SECONDS`,
-`--dry-run`. Pin a model slug only when asked — free-model availability varies.
-The runner finds `ocodex` from `OCODEX_BIN`, PATH, `~/bin/ocodex`,
-`~/.local/bin/ocodex` so desktop apps do not depend on shell startup files.
+Doctor must see SearXNG (`SEARXNG_URL`, default `http://127.0.0.1:8080`) and
+Docker. Workers cannot web-search without it.
 
-The launcher probes the key pool (orslot if present; ~5 workers/key, 1,000
-req/key/day, ~40/agent), injects structured crash checkpoints (dead workers
-leave `<name>.progress.md`), runs a work-stealing pool (one runner per agent;
-the next job starts the moment a slot frees), retries a death once from the
-checkpoint unless the failure is classified fatal, then writes `all.done`.
-`"after": ["other-name"]` holds a job until those agents succeed — scouts
-can stream into fixers in one launch. Two deaths of the same agent, or a
-blocked dependency, go to the supervisor.
+## Placement
 
-Watch a live batch (name, goal, state, runtime, last checkpoint, current
-step) with `fleet_watch.py`, or `cat $OUT/status.txt`.
+- **Ocodex** when output is cheap to verify (facts vs source, tests, diffs).
+- **Native agent** when verification costs as much as generation.
+- **Main loop** when being wrong once is unacceptable.
 
-## 4 · Supervise
+## Field-measured failure modes (2026-08-25, four batches)
 
-Spawn ONE supervisor immediately, pointed at the doctrine file — keep the
-brief to the slots:
+1. **~25% hard failure**: provider stream disconnects → empty output. Harness retries once; still empty → supervisor does the task.
+2. **Confident factual errors**: one docs batch "succeeded" with 8 wrong claims. Workers are never the source of truth.
+3. **Sandbox limits**: worker sandboxes cannot run the real build. Supervisor always does.
+4. **Stale briefs**: the working tree is truth; the manifest is context.
+5. **Cross-batch confusion**: every supervisor brief lists other live batches' owned files as expected-and-off-limits.
 
-> Read SUPERVISOR.md (same directory as this SKILL.md) and follow it exactly.
-> OUT=<out>. Repo: <path> (git baseline committed pre-launch). Workers and
-> ownership: <list>. Concurrent work (expected in git status, off-limits):
-> <ledger>. Real verification commands + expected results: <commands>.
-> Authoritative facts: <facts>.
+## Batch design
 
-Harness: Claude Code — spawn a native supervisor (sonnet). Grok — spawn a
-subagent. Codex/desktop — run SUPERVISOR.md yourself as its own step after
-`all.done`. Never skip supervision.
+- Scouts (read-only, `effort: high` for real review): CONFIRMED vs PLAUSIBLE, file:line + trigger + consequence.
+- Workers (edit): disjoint `owns`, each fix states a failure scenario. Ban refactors in the prompt.
+- Worker prompts are a **compact brief** (goal, owns, facts, output contract, stop, STEP ZERO + heartbeat). Do **not** dump this file into the task string.
+- The launcher rejects overlapping `owns` (exit 2) and refuses a stale out-dir that already contains `*.done` (exit 2).
 
-Commit a git baseline BEFORE launching so every diff is worker output.
+## Checkpoints and heartbeats
 
-## 5 · Integrate
+STEP ZERO of every worker prompt: write analysis into `<OUT>/<name>.progress.md`
+**before editing any owned file**. Then one checkpoint bullet per named
+sub-task or per file touched. Append `HEARTBEAT <ISO-Z> | <subtask> | <focus>`
+at least every **2 minutes** and after every sub-task. The slot board marks
+STALE otherwise. The harness kills a stale worker and auto-retries once from
+the existing checkpoint (does not start over). If the retry is still stale/fail,
+the supervisor treats it as dead and finishes from the checkpoint. The harness
+creates the progress file at launch so a crash still leaves something.
 
-Act only on the supervisor's verdict. Final visual/hardware checks stay with
-you — supervisors can build, not look. Report per-worker verdicts honestly,
-including deaths and reverts.
+## Supervision
 
-## Known failure modes (measured)
+Spawn prompt stays short — doctrine is SUPERVISOR.md; `run` already filled
+the slots. Point the supervisor at `$OUT/supervisor-brief.md`. Parse
+`<name>.result.json` before the prose final reply. Verify claims against
+source. Revert anything you cannot confirm. Failed/empty/STALE worker after the harness retry → finish from the
+checkpoint. Supervisor still checks the result even when the retry recovered.
+Run the REAL build/tests yourself. Do not commit.
 
-Provider stream deaths (~25%; launcher retries once, then supervisor finishes
-from the checkpoint) · Codex dropping the OpenRouter stream (proxy logs
-`BrokenPipeError`; empty final file) · hung workers with no checkpoint
-heartbeat (runner kills them after 600s stall) · confident factual errors
-(verify every claim against source) · worker sandboxes cannot run real
-builds (typecheck only — the supervisor runs real builds/tests) ·
-supervisors judging foreign diffs (the ledger slot prevents it).
+`status` is the live board (name, mode, focus, last update, elapsed,
+heartbeat, alive/retrying/stale/dead/done, API/slot). No LLM required to render it.
+
+## Bandwidth
+
+Default `--workers-per-key 6` is rate-limit headroom, not a crash ceiling.
+OpenRouter daily request limits reset every day — yesterday's 429s do not count today.
+Request estimates in the launcher are labeled guesses, not measurements.
+
+## Toward proper cloud agents (aspiration, not yet)
+
+Workers still cannot message back mid-run. Until resumable sessions exist:
+batches + supervisors is the honest ceiling.
+
+## Search (the actual multiplier)
+
+Do not ask a scout to wander. Harvest first, pack read-only piles, never write:
+
+```bash
+python3 ~/.claude/skills/ocodex/scripts/ocodex_managed.py search "quota reset" \
+  --workdir /path/to/tree --out-dir $OUT --dry-run
+# live: drop --dry-run. web: add --web (SearXNG URLs, still read-only)
+```
+
+Works on code, docs, notes, anything text. `--web` harvests URLs instead of files.
+`--max-scouts` default 6. Hits land in `$OUT/hits.json`. Any edit in this batch is a failure.
+
+## Power-ups that shipped
+
+- **Session resume on death**: workers are no longer `--ephemeral`. A stream
+  drop retries with `codex exec resume <session>` (same conversation), not a
+  blank amnesiac. Progress files remain the fallback if no session id landed.
+- **Scout timeout 300s** unless the manifest sets one. Short hunts die less.
+- **UTC midnight pause**: stop launching 10 minutes before the OpenRouter
+  daily reset (`OCODEX_MIDNIGHT_WINDOW_SEC=0` to disable).
+- **Work-stealing pool**: one runner per agent. A freed slot takes the next
+  agent immediately (no 6-agent wave sitting idle on one slow worker).
+- **Live cap**: `orslot` is re-probed during the run. A dry pool defers
+  remaining agents (`all.done` contains `deferred:N`) instead of launching
+  into a 429 storm.
+- **OpenRouter `/key`**: optional credit snapshot into `ledger.json` (still
+  no req/day from their API — orslot keeps counting that).
+- **Mechanical triage**: `<OUT>/triage.json` after `all.done`. Supervisor
+  reads it first.
+- **CLAIM lines**: `CLAIM | C|I | claim | path:line | "snippet"`. I-tags
+  are discarded by default. `python3 scripts/claims.py $OUT --workdir $REPO`.
+- **BYOK providers**: `examples/providers.json` → `~/.ocodex/providers.json`.
+  Set `GROQ_API_KEY` and `OCODEX_SCOUT_PROVIDER=groq` to run scouts off
+  OpenRouter. Explicit `provider` / `tier` / `model` on an agent still win.
+  Retry uses the next model in the tier chain.

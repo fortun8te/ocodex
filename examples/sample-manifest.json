@@ -1,0 +1,11 @@
+{
+  "workdir": ".",
+  "agents": [
+    {
+      "name": "sample-scout",
+      "mode": "scout",
+      "effort": "low",
+      "task": "Read README.md. Quote the three rules in one paragraph. Do not edit files."
+    }
+  ]
+}

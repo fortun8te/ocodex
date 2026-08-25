@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+# Thin terminal alias for the live slot board.
+ROOT="$(cd "$(dirname "$0")" && pwd)"
+exec python3 "$ROOT/ocodex_managed.py" status "$@"
