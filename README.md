@@ -7,9 +7,9 @@ generation — that is the whole product.
 
 Workers are fallible (stream disconnects, confident factual errors). They never
 ship unsupervised. The launcher is capacity-aware, crash-checkpoints every
-task, heartbeats every 2 minutes, retries empty/crash once, and leaves a
-machine-readable ledger so the supervisor does not burn tokens reconstructing
-what happened.
+task, heartbeats every 2 minutes, retries empty/crash/stale-heartbeat once from the
+checkpoint, and leaves a machine-readable ledger so the supervisor does not
+burn tokens reconstructing what happened.
 
 Power is **not** "spawn more workers". Default ceiling is ~6 concurrent
 workers per OpenRouter key. Scale with more keys (`orslot add`) and better
@@ -95,6 +95,7 @@ Then spawn **one** supervisor with the printed SUPERVISOR BRIEF
 | `OCODEX_BATCH_OUT` | set by launcher | batch out-dir (checkpoints + result.json) |
 | `OCODEX_KEY_SLOT` | unset | recorded on the slot board when known |
 | `OCODEX_POLL_INTERVAL` | `5` | launcher wait-loop seconds |
+| `OCODEX_HEARTBEAT_SEC` | `120` | kill+retry-once from checkpoint if last HEARTBEAT is older than this |
 | `--workers-per-key` | **6** | default concurrency per key; override 8–10, not 20 |
 | `--max-workers` | pool-derived | hard cap for this run; exceeding recommended 6/key warns, does not crash |
 | `--timeout` | 900 | per-agent seconds |
@@ -138,8 +139,10 @@ result.json + stats.jsonl). No LLM.
 | STATE | `alive` / `retrying` / `STALE` / `dead` / `done` |
 | API/SLOT | model + key slot if recorded |
 
-Heartbeat older than **2 minutes** without a result → `STALE`. Supervisor
-treats stale-without-result as likely-dead.
+Heartbeat older than **2 minutes** without a result → `STALE`. The harness
+kills the worker and auto-retries **once from the checkpoint**. If the retry
+is still stale/fail, `status` is `dead` and the supervisor finishes the task
+(still checks the result).
 
 ## The three rules
 
@@ -205,7 +208,7 @@ $OUT/
 | `scripts/ocodex_managed.py` | `doctor` `run` `launch` `status` `wait` |
 | `scripts/ocodex-status` | thin alias → `status` |
 | `scripts/launch_batches.py` | waves, ledger, checkpoints, signals, headroom |
-| `scripts/run_agents.py` | compact brief, retry-once, stats, result.json |
+| `scripts/run_agents.py` | compact brief, retry-once (empty/crash/stale from checkpoint), stats, result.json |
 | `scripts/wait_done.py` | block until `all.done` (no LLM sleep loop) |
 | `scripts/harness_lib.py` | validation, checkpoint text, stats, status board |
 | `examples/sample-manifest.json` | first-run scout |
@@ -214,11 +217,14 @@ $OUT/
 ## Troubleshooting
 
 **Dead / empty workers (~25% on stream errors).** Harness retries **once**
-on `return_code != 0` or empty final reply, then leaves it. `status` shows
-`retrying` then `dead`. Supervisor finishes from `<name>.progress.md`.
+on `return_code != 0` or empty final reply (RESUME from the checkpoint, do
+not start over), then leaves it. `status` shows `retrying` then `dead`.
+Supervisor still checks the result; unfinished work is finished from
+`<name>.progress.md`.
 
-**STALE on the slot board.** Last heartbeat older than 2 minutes and no
-result. Treat as likely-dead.
+**STALE on the slot board.** Last heartbeat older than 2 minutes. The harness
+kills the worker and auto-retries **once from the checkpoint**. If the retry
+is still stale/fail, `status` is `dead` and the supervisor finishes the task.
 
 **`refusing to run: all.done already exist` (exit 2).** Stale out-dir. New
 `--out-dir` or delete `*.done`.
