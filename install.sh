@@ -1,9 +1,12 @@
 #!/bin/bash
-# Installs the ocodex-managed skill for Claude Code (and Codex, if present).
+# Installs the ocodex skill for Claude Code, Grok, Codex, and Cursor when present.
 set -euo pipefail
 SRC="$(cd "$(dirname "$0")" && pwd)"
-for DEST in "$HOME/.claude/skills/ocodex" "$HOME/.codex/skills/ocodex"; do
-    [[ "$DEST" == *"/.codex/"* && ! -d "$HOME/.codex" ]] && continue
+DESTS=("$HOME/.claude/skills/ocodex")
+[[ -d "$HOME/.grok" ]] && DESTS+=("$HOME/.grok/skills/ocodex")
+[[ -d "$HOME/.codex" ]] && DESTS+=("$HOME/.codex/skills/ocodex")
+[[ -d "$HOME/.cursor" ]] && DESTS+=("$HOME/.cursor/skills/ocodex")
+for DEST in "${DESTS[@]}"; do
     mkdir -p "$DEST/scripts"
     cp "$SRC/SKILL.md" "$SRC/SUPERVISOR.md" "$DEST/"
     cp "$SRC/scripts/"*.py "$DEST/scripts/"
@@ -11,3 +14,4 @@ for DEST in "$HOME/.claude/skills/ocodex" "$HOME/.codex/skills/ocodex"; do
     echo "installed -> $DEST"
 done
 echo "Requires: an 'ocodex' CLI on PATH. Optional: orslot for multi-key pools."
+echo "Watch a live batch: python3 $HOME/.claude/skills/ocodex/scripts/fleet_watch.py <OUT>"

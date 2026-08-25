@@ -26,4 +26,4 @@ Result: free workers do the generation, one strong model does the verification, 
 
 Everything is open: two Python scripts (batch runner with ownership validation + capacity-aware launcher), a supervisor doctrine file, and the measured failure modes. Drops into Claude Code as a skill via install.sh.
 
-https://github.com/fortun8te/ocodex-managed
+https://github.com/fortun8te/ocodex

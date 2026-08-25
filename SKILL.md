@@ -1,122 +1,122 @@
 ---
 name: ocodex
-description: The ocodex parallel-worker system — free external agents with mandatory Sonnet supervision. THE single entry point for ocodex (self-contained: the runner ships in scripts/). Use whenever a task splits into bounded, self-contained chunks that are cheap to VERIFY (doc sync, test authoring, mechanical fixes, audits, parity chores, bug hunts), or whenever you'd spawn several subagents at once. Standing preference: reach for this before native subagents for routine parallel work; scale bandwidth with concurrent batches.
+description: "/ocodex <goal> — run any decomposable task on a fleet of free supervised parallel agents. Entry point for every harness (Claude Code, Codex, Grok, Cursor, desktop). Use for bug hunts, doc sync, test authoring, audits, mechanical fixes, parity chores — anything that splits into bounded chunks that are cheap to VERIFY — or whenever several subagents would be spawned at once."
 ---
 
-# Ocodex, managed — one skill
+# /ocodex — free supervised agent fleet, one command
 
-Free external workers + one paid Sonnet auditor per batch. The composite has
-shipped zero errors; the raw workers alone would have shipped plenty. Never
-run unsupervised.
+Take the user's goal and run the whole pipeline: decompose → launch → supervise
+→ integrate. Workers are free and fallible (~25% die; survivors ship confident
+errors); the supervisor is the only quality gate. Never run unsupervised.
 
-## The placement rule (decides everything)
+Scripts live in `scripts/` beside this SKILL.md. Locate them from this file —
+harnesses load the same copy via symlink. Never hardcode a product home.
 
-- **Ocodex** when the output is *cheap to verify* (facts checkable against
-  source, tests runnable, diffs reviewable).
-- **Native agent (opus/fable)** when verification costs as much as generation
-  (taste, design, tricky concurrency, anything the owner rejected drafts of).
-- **Main loop** when being wrong once is unacceptable (hardware, destructive
-  ops, live-state debugging).
-Free tilts this boundary; it does not remove it.
+## 1 · Place the work first
 
-## Field-measured failure modes (2026-08-25, four batches)
+- Cheap to verify (facts checkable, tests runnable, diffs reviewable) → workers.
+- Verification costs as much as generation (taste, design, tricky concurrency) →
+  a strong native agent instead. Wrong-once-unacceptable (hardware, destructive,
+  live-state) → do it yourself. Free tilts this boundary; it never removes it.
 
-1. **~25% hard failure**: provider stream disconnects → empty output. Retry
-   once; still empty → the supervisor does the task itself.
-2. **Confident factual errors**: one docs batch "succeeded" with 8 wrong
-   claims. Workers never get to be the source of truth — every fact goes in
-   the prompt or gets verified against code.
-3. **Sandbox limits**: worker sandboxes block SwiftPM/clang module-cache
-   writes. Tell Swift workers to verify with `swiftc -typecheck` or
-   best-effort build; the SUPERVISOR always runs the real build/tests.
-4. **Stale briefs**: the tree may have moved since the manifest was written.
-   Tell workers: *the working tree is truth; the manifest is context* — one
-   worker's best decision was deviating from a stale brief correctly.
-5. **Cross-batch confusion**: a supervisor seeing another batch's diffs will
-   try to judge them. Every supervisor brief MUST list the other live
-   batches' owned files as expected-and-off-limits.
+## 2 · Decompose
 
-## Batch design
+- **scouts** (read-only, `"effort": "high"` for real review) for danger zones —
+  concurrency, protocols, delivery pipelines. Demand CONFIRMED (traced path)
+  vs PLAUSIBLE, with file:line + trigger + consequence.
+- **workers** (edit) only with disjoint `owns` lists, only where every fix can
+  state a concrete failure scenario. Ban refactors/style churn explicitly.
+  Do not assign two workers the same browser, desktop, app, branch, or other
+  mutable external system.
+- Prompts are fully self-contained (workers see no conversation): goal, paths,
+  authoritative facts, output shape, stopping point — and tell them **the
+  working tree is truth; the brief is context**. Do not ask a worker to spawn
+  more agents or run `codex`/`ocodex`. Never include secrets.
+- Before launching, write the **ownership ledger**: files owned by you and by
+  every live batch; the new `owns` lists must not collide with any of it.
 
-- Scouts (read-only, `effort: high` for real review) for danger zones — BLE,
-  concurrency, delivery pipelines. Demand CONFIRMED (traced path) vs
-  PLAUSIBLE labels with file:line + trigger + consequence.
-- Workers (edit) only with disjoint `owns` lists and only where each fix can
-  state a concrete failure scenario. Ban refactors and style churn in the
-  prompt, explicitly.
-- ≤6 agents per batch (runner cap), ≤1 build-heavy worker per batch.
-- Prompts fully self-contained: goal, paths, authoritative facts, output
-  shape, stopping point. Workers see no conversation.
+## 3 · Launch
 
-## Bandwidth: the slot pool is the ceiling
+Write a master manifest (outside the repo when practical):
 
-Every ocodex worker process claims its OWN OpenRouter key slot (`orslot
-claim`), and the counting proxy retries 429s on a different slot — multi-key
-parallelism is native. Rules of thumb: ~5 concurrent workers per key, 1,000
-requests/key/day (~40/agent budget). Grow bandwidth with `orslot add`; check
-headroom with `orslot` (instant) before sizing a batch.
-
-Use the capacity-aware launcher for anything beyond a handful of agents —
-one master manifest, any number of agents; it probes the pool, injects crash
-checkpoints into every task, chunks into ≤5-agent runner waves under the
-concurrency cap, and writes `all.done` when finished:
-
-```bash
-OUT=<scratchpad>/ocodex-<name>; mkdir -p $OUT
-# write $OUT/master.json ({"workdir": ..., "agents": [{name, mode, owns?, effort?, task}]})
-python3 ~/.claude/skills/ocodex-managed/scripts/launch_batches.py $OUT/master.json --out-dir $OUT   # run_in_background
+```json
+{
+  "workdir": "/absolute/path/to/project",
+  "agents": [
+    {
+      "name": "trace-auth",
+      "mode": "scout",
+      "effort": "high",
+      "task": "Find where login tokens are refreshed. Return file:line and likely failure points. Do not edit."
+    },
+    {
+      "name": "fix-parser",
+      "mode": "worker",
+      "owns": ["src/parser.ts", "tests/parser.test.ts"],
+      "after": ["trace-auth"],
+      "task": "Fix the confirmed empty-input parser bug and add focused tests. Run only the relevant tests."
+    }
+  ]
+}
 ```
 
-Before launching, write the **ownership ledger** — files owned by the main
-loop and each live batch — and check the new `owns` lists against all of it.
-SwiftPM lock contention between chunks waits; it does not corrupt.
+```bash
+OUT=<scratch>/ocodex-<name>; mkdir -p $OUT
+python3 <this-skill>/scripts/launch_batches.py $OUT/master.json --out-dir $OUT  # background
+python3 <this-skill>/scripts/fleet_watch.py $OUT                                # other pane, or --once
+```
 
-## Crash auto-save
+Launcher flags: `--out-dir` (required), `--max-workers N`, `--workers-per-key N`,
+`--context-pack` (build and inject a commit-versioned CONTEXT.md), `--watch` /
+`--no-watch` (live table on a tty; default on when stdout is a tty).
 
-The launcher appends a CHECKPOINT clause to every task: workers must create
-`<OUT>/<name>.progress.md` immediately and append after each step. When a
-worker dies (~25% do), the supervisor finishes the task from that file
-instead of starting over. Hand-written single batches via the legacy runner
-should include the same clause manually.
+The launcher calls the sibling runner (`scripts/run_agents.py`); runner flags:
+`--out-dir`, `--max-parallel N` (≤6), `--model SLUG`, `--timeout SECONDS`,
+`--dry-run`. Pin a model slug only when asked — free-model availability varies.
+The runner finds `ocodex` from `OCODEX_BIN`, PATH, `~/bin/ocodex`,
+`~/.local/bin/ocodex` so desktop apps do not depend on shell startup files.
 
-## Supervision
+The launcher probes the key pool (orslot if present; ~5 workers/key, 1,000
+req/key/day, ~40/agent), injects structured crash checkpoints (dead workers
+leave `<name>.progress.md`), runs a work-stealing pool (one runner per agent;
+the next job starts the moment a slot frees), retries a death once from the
+checkpoint unless the failure is classified fatal, then writes `all.done`.
+`"after": ["other-name"]` holds a job until those agents succeed — scouts
+can stream into fixers in one launch. Two deaths of the same agent, or a
+blocked dependency, go to the supervisor.
 
-Immediately spawn one Sonnet supervisor per launch (Agent tool). Keep the
-spawn prompt SHORT — point it at the doctrine file and fill only the slots:
+Watch a live batch (name, goal, state, runtime, last checkpoint, current
+step) with `fleet_watch.py`, or `cat $OUT/status.txt`.
 
-> Read ~/.claude/skills/ocodex-managed/SUPERVISOR.md and follow
-> it exactly. OUT=<out-dir>. Repo: <path>. Workers and ownership: <list>.
-> Concurrent work (expected in git status, off-limits): <ledger>. Real
-> verification commands + expected results: <commands>. Facts that are
-> authoritative: <facts>.
+## 4 · Supervise
 
-Do not pre-review worker output yourself; integrate only after its report.
-The final visual/hardware check (a UI on screen, a device behaving) stays
-with the main loop — supervisors can build, not look.
+Spawn ONE supervisor immediately, pointed at the doctrine file — keep the
+brief to the slots:
 
-## Supervisor brief template (fill every <slot>)
+> Read SUPERVISOR.md (same directory as this SKILL.md) and follow it exactly.
+> OUT=<out>. Repo: <path> (git baseline committed pre-launch). Workers and
+> ownership: <list>. Concurrent work (expected in git status, off-limits):
+> <ledger>. Real verification commands + expected results: <commands>.
+> Authoritative facts: <facts>.
 
-> You supervise ocodex workers whose batch runs under <OUT> (unique batch
-> subfolder: per-agent final replies + stderr; manifest.json has the tasks).
-> Poll with `sleep 60` loops until finished (~20 min cap; runner timeout 15).
-> CONCURRENT WORK: <other live batches + main loop file ownership — expected
-> in git status, off-limits to you>. Then, per worker: read final reply and
-> stderr; `git diff` its owned files; verify every claim and every fix
-> against the actual source — a plausible-sounding wrong fix is worse than no
-> fix; REVERT refactors, style churn, and fixes whose scenario you cannot
-> confirm by reading the code. Scope: edit only inside this batch's owned
-> files, only after the batch ends. Failed/empty worker → do its task
-> yourself from the fact list. Run the REAL verification yourself:
-> <build/test commands + expected results — worker sandboxes cannot>.
-> Scout findings: re-trace CONFIRMED ones yourself; report, never fix them.
-> Do not commit. Return: per-worker verdict (clean / fixed-after-pruning /
-> reverted / failed), accepted fixes (file:line + scenario), reverted changes
-> with reasons, verified findings ranked, final build+test results.
+Harness: Claude Code — spawn a native supervisor (sonnet). Grok — spawn a
+subagent. Codex/desktop — run SUPERVISOR.md yourself as its own step after
+`all.done`. Never skip supervision.
 
-## Toward proper cloud agents (aspiration, not yet)
+Commit a git baseline BEFORE launching so every diff is worker output.
 
-What blocks it today: workers can't message back mid-run, share no context,
-sit in write-limited sandboxes, and free-slot rate limits make them flaky
-(~25%). When ocodex gains resumable sessions or live messaging, promote this
-pattern: persistent named workers, supervisor as router, main loop as owner.
-Until then: batches + supervisors is the honest ceiling.
+## 5 · Integrate
+
+Act only on the supervisor's verdict. Final visual/hardware checks stay with
+you — supervisors can build, not look. Report per-worker verdicts honestly,
+including deaths and reverts.
+
+## Known failure modes (measured)
+
+Provider stream deaths (~25%; launcher retries once, then supervisor finishes
+from the checkpoint) · Codex dropping the OpenRouter stream (proxy logs
+`BrokenPipeError`; empty final file) · hung workers with no checkpoint
+heartbeat (runner kills them after 600s stall) · confident factual errors
+(verify every claim against source) · worker sandboxes cannot run real
+builds (typecheck only — the supervisor runs real builds/tests) ·
+supervisors judging foreign diffs (the ledger slot prevents it).

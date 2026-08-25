@@ -1,4 +1,4 @@
-# ocodex-managed
+# ocodex
 
 **Free parallel coding agents you can actually trust.**
 
@@ -21,12 +21,12 @@ expensive agents on any task whose output is cheap to verify.
 ## Install
 
 ```bash
-git clone https://github.com/fortun8te/ocodex-managed && cd ocodex-managed && ./install.sh
+git clone https://github.com/fortun8te/ocodex && cd ocodex && ./install.sh
 ```
 
 The script copies `SKILL.md`, `SUPERVISOR.md`, and the scripts into
-`~/.claude/skills/ocodex-managed` (and `~/.codex/skills/ocodex-managed` when a
-`.codex` home exists), so Claude Code can pick the whole system up as a skill.
+`~/.claude/skills/ocodex` (and Grok / Codex / Cursor skill homes when those
+directories exist).
 
 Requirements:
 
@@ -57,6 +57,7 @@ for edits under explicit file ownership:
     { "name": "find-bugs", "mode": "scout", "effort": "high",
       "task": "Read-only bug hunt in src/. Label CONFIRMED vs PLAUSIBLE, file:line, trigger, consequence." },
     { "name": "fix-parser", "mode": "worker", "owns": ["src/parser.ts"],
+      "after": ["find-bugs"],
       "task": "Fix only bugs with a stated failure scenario. No refactors." } ] }
 ```
 
@@ -64,11 +65,19 @@ Launch:
 
 ```bash
 python3 scripts/launch_batches.py manifest.json --out-dir ./out
+python3 scripts/fleet_watch.py ./out          # other pane: name, goal, state, runtime, current step
 ```
 
 The launcher probes your key pool, injects **crash checkpoints** into every
-task (dead workers leave `<name>.progress.md` behind), chunks agents into
-waves under the concurrency cap, and writes `all.done` at the end.
+task (dead workers leave `<name>.progress.md` behind), runs a **work-stealing
+pool** (next agent starts the moment a slot frees — no wave boundaries),
+retries a death once from the checkpoint, and writes `all.done`.
+
+`--context-pack` builds a commit-versioned `CONTEXT.md` and injects it into
+every worker. `"after": ["other-name"]` waits for that agent to succeed
+before spawning (scouts → fixers in one launch).
+
+Live status is also `$OUT/status.txt` (`watch -n1 cat out/status.txt`).
 
 Then spawn one supervisor agent (any strong model) with `SUPERVISOR.md` as
 its doctrine, filling the slots: out-dir, file ownership, real verification

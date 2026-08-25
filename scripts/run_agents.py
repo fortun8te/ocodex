@@ -17,6 +17,9 @@ import tempfile
 import time
 from typing import Any
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from classify import classify  # noqa: E402
+
 
 MAX_AGENTS = 6
 NAME_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$")
@@ -96,6 +99,20 @@ def validate(data: dict[str, Any], default_timeout: int) -> tuple[Path, list[dic
         effort = raw.get("effort")
         if effort is not None and effort not in {"low", "medium", "high", "xhigh"}:
             fail(f"agent {name} effort must be low, medium, high, or xhigh")
+        after = raw.get("after", [])
+        if after is None:
+            after = []
+        if not isinstance(after, list) or not all(isinstance(item, str) and NAME_RE.fullmatch(item) for item in after):
+            fail(f"agent {name} after must be a list of agent names")
+        kind = raw.get("kind")
+        if kind is not None and (not isinstance(kind, str) or not kind.strip()):
+            fail(f"agent {name} kind must be a non-empty string")
+        risk = raw.get("risk")
+        if risk is not None and risk not in {"low", "medium", "high"}:
+            fail(f"agent {name} risk must be low, medium, or high")
+        stall = raw.get("stall")
+        if stall is not None and (not isinstance(stall, int) or stall < 0):
+            fail(f"agent {name} stall must be an integer number of seconds (0 disables)")
         normalized.append({
             "name": name,
             "task": task.strip(),
@@ -104,6 +121,10 @@ def validate(data: dict[str, Any], default_timeout: int) -> tuple[Path, list[dic
             "timeout": timeout,
             "model": model,
             "effort": effort,
+            "after": after,
+            "kind": kind.strip() if isinstance(kind, str) else None,
+            "risk": risk,
+            "stall": stall,
         })
     return workdir.resolve(), normalized
 
@@ -197,6 +218,40 @@ def command_for(
     return command
 
 
+def _tail_lines(path: Path, n: int = 8) -> list[str]:
+    try:
+        lines = [ln.strip() for ln in path.read_text(encoding="utf-8", errors="replace").splitlines() if ln.strip()]
+    except OSError:
+        return []
+    return lines[-n:]
+
+
+def write_live(out_dir: Path, payload: dict[str, Any]) -> None:
+    try:
+        (out_dir / "live.json").write_text(json.dumps(payload, indent=2) + "\n")
+    except OSError:
+        pass
+
+
+def checkpoint_paths(out_dir: Path, name: str) -> list[Path]:
+    return [
+        out_dir / f"{name}.progress.md",
+        out_dir.parent / f"{name}.progress.md",
+    ]
+
+
+def stall_age(out_dir: Path, name: str, started: float, now: float) -> float:
+    """Seconds since the last checkpoint write; missing file counts as 'since start'."""
+    newest: float | None = None
+    for path in checkpoint_paths(out_dir, name):
+        try:
+            mtime = path.stat().st_mtime
+        except OSError:
+            continue
+        newest = mtime if newest is None else max(newest, mtime)
+    return now - (newest if newest is not None else started)
+
+
 def terminate(process: subprocess.Popen[str]) -> None:
     try:
         os.killpg(process.pid, signal.SIGTERM)
@@ -222,6 +277,7 @@ def run_one(
     final_file.unlink(missing_ok=True)
     command = command_for(agent, workdir, final_file, default_model, ocodex_bin)
     started = time.monotonic()
+    started_wall = time.time()
     with stdout_file.open("w", encoding="utf-8") as stdout, stderr_file.open("w", encoding="utf-8") as stderr:
         process = subprocess.Popen(
             command,
@@ -242,15 +298,30 @@ def run_one(
         except BrokenPipeError:
             pass
         deadline = started + agent["timeout"]
+        stall_limit = agent.get("stall")
+        if stall_limit is None:
+            stall_limit = int(os.environ.get("OCODEX_STALL_S", "600"))
         final_signature: tuple[int, int] | None = None
         final_stable_since: float | None = None
         timed_out = False
+        stalled = False
         completed_from_final = False
+        last_live = 0.0
         while True:
             return_code = process.poll()
             if return_code is not None:
                 break
             now = time.monotonic()
+            if now - last_live >= 2:
+                write_live(out_dir, {
+                    "name": name,
+                    "state": "running",
+                    "pid": process.pid,
+                    "seconds": round(now - started, 1),
+                    "stdout_tail": _tail_lines(stdout_file),
+                    "stderr_tail": _tail_lines(stderr_file),
+                })
+                last_live = now
             if final_file.exists() and final_file.stat().st_size:
                 stat = final_file.stat()
                 signature = (stat.st_size, stat.st_mtime_ns)
@@ -264,6 +335,12 @@ def run_one(
                     return_code = 0
                     completed_from_final = True
                     break
+            if stall_limit and stall_age(out_dir, name, started_wall, time.time()) >= stall_limit:
+                terminate(process)
+                return_code = process.returncode if process.returncode is not None else 124
+                stalled = True
+                timed_out = True
+                break
             if now >= deadline:
                 terminate(process)
                 return_code = process.returncode if process.returncode is not None else 124
@@ -277,11 +354,14 @@ def run_one(
         "ok": return_code == 0 and final_ok and not timed_out,
         "return_code": return_code,
         "timed_out": timed_out,
+        "stalled": stalled,
         "terminated_after_final": completed_from_final,
         "seconds": round(time.monotonic() - started, 2),
         "final_file": str(final_file),
         "stdout_file": str(stdout_file),
         "stderr_file": str(stderr_file),
+        "kind": agent.get("kind"),
+        "risk": agent.get("risk"),
     }
     if not result["ok"]:
         harmless = "/Users/michael/bin/ocodex:25: device not configured: /dev/tty"
@@ -290,6 +370,15 @@ def run_one(
             if line.strip() and line.strip() != harmless
         ]
         result["error_tail"] = stderr_lines[-12:]
+    result["class"] = classify(result)
+    write_live(out_dir, {
+        "name": name,
+        "state": "ok" if result["ok"] else "failed",
+        "seconds": result["seconds"],
+        "class": result["class"],
+        "stdout_tail": _tail_lines(stdout_file),
+        "stderr_tail": _tail_lines(stderr_file),
+    })
     return result
 
 
@@ -325,7 +414,7 @@ def main() -> int:
         out_root.mkdir(parents=True, exist_ok=True)
         out_dir = Path(tempfile.mkdtemp(prefix="batch-", dir=out_root))
     else:
-        out_dir = Path(tempfile.mkdtemp(prefix="ocodex-subagents-"))
+        out_dir = Path(tempfile.mkdtemp(prefix="ocodex-batch-"))
 
     if args.dry_run:
         plan = []
@@ -345,6 +434,9 @@ def main() -> int:
         results = [future.result() for future in futures]
 
     summary = {"out_dir": str(out_dir), "ok": all(item["ok"] for item in results), "agents": results}
+    (out_dir / "results.json").write_text(json.dumps(summary, indent=2))
+    if args.out_dir:
+        (out_root / "results.json").write_text(json.dumps(summary, indent=2))
     print(json.dumps(summary, indent=2))
     return 0 if summary["ok"] else 1
 
