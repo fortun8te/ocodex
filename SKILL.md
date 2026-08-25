@@ -6,9 +6,10 @@ description: The ocodex parallel-worker system — cheap external agents with ma
 # Ocodex, managed
 
 Cheap OpenRouter-backed workers + one paid supervisor per batch. Never run
-unsupervised. The harness retries empty/crash once, checkpoints as STEP ZERO
-(with a heartbeat every 2 minutes), and writes ledger/stats/result files so
-the supervisor does not reconstruct the run from prose.
+unsupervised. The harness retries empty/crash/stale-heartbeat once from the existing
+checkpoint (does not start over), checkpoints as STEP ZERO (with a heartbeat
+every 2 minutes), and writes ledger/stats/result files so the supervisor
+does not reconstruct the run from prose.
 
 Power is not "spawn more workers". Default ~6 concurrent per OpenRouter key.
 `--workers-per-key 8` is allowed (429s hop/backoff, not a crash). Do not
@@ -67,19 +68,22 @@ STEP ZERO of every worker prompt: write analysis into `<OUT>/<name>.progress.md`
 **before editing any owned file**. Then one checkpoint bullet per named
 sub-task or per file touched. Append `HEARTBEAT <ISO-Z> | <subtask> | <focus>`
 at least every **2 minutes** and after every sub-task. The slot board marks
-STALE otherwise; the supervisor treats stale-without-result as likely-dead.
-The harness creates the progress file at launch so a crash still leaves something.
+STALE otherwise. The harness kills a stale worker and auto-retries once from
+the existing checkpoint (does not start over). If the retry is still stale/fail,
+the supervisor treats it as dead and finishes from the checkpoint. The harness
+creates the progress file at launch so a crash still leaves something.
 
 ## Supervision
 
 Spawn prompt stays short — doctrine is SUPERVISOR.md; `run` already filled
 the slots. Point the supervisor at `$OUT/supervisor-brief.md`. Parse
 `<name>.result.json` before the prose final reply. Verify claims against
-source. Revert anything you cannot confirm. Failed/empty/STALE worker →
-finish from the checkpoint. Run the REAL build/tests yourself. Do not commit.
+source. Revert anything you cannot confirm. Failed/empty/STALE worker after the harness retry → finish from the
+checkpoint. Supervisor still checks the result even when the retry recovered.
+Run the REAL build/tests yourself. Do not commit.
 
 `status` is the live board (name, mode, focus, last update, elapsed,
-heartbeat, alive/stale/dead/done, API/slot). No LLM required to render it.
+heartbeat, alive/retrying/stale/dead/done, API/slot). No LLM required to render it.
 
 ## Bandwidth
 

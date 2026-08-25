@@ -30,7 +30,10 @@ def main() -> int:
     stdin = sys.stdin.read()
     dump = os.environ.get("FAKE_OCODEX_STDIN")
     if dump:
-        Path(dump).write_text(stdin, encoding="utf-8")
+        path = Path(dump)
+        prev = path.read_text(encoding="utf-8") if path.exists() else ""
+        sep = "\n=====NEXT ATTEMPT=====\n" if prev else ""
+        path.write_text(prev + sep + stdin, encoding="utf-8")
     pidfile = os.environ.get("FAKE_OCODEX_PIDFILE")
     if pidfile:
         Path(pidfile).write_text(str(os.getpid()), encoding="utf-8")
@@ -41,6 +44,15 @@ def main() -> int:
         time.sleep(float(os.environ.get("FAKE_OCODEX_SLEEP", "60")))
         if outfile:
             Path(outfile).write_text("slept\n", encoding="utf-8")
+        return 0
+    if mode == "sleep_once":
+        if n == 1:
+            time.sleep(float(os.environ.get("FAKE_OCODEX_SLEEP", "60")))
+            if outfile:
+                Path(outfile).write_text("slept\n", encoding="utf-8")
+            return 0
+        if outfile:
+            Path(outfile).write_text("resumed after stale heartbeat\n", encoding="utf-8")
         return 0
     if mode == "fail_once":
         if n == 1:
