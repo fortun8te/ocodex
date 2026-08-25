@@ -21,7 +21,7 @@ expensive agents on any task whose output is cheap to verify.
 ## Install
 
 ```bash
-git clone https://github.com/OWNER/ocodex-managed && cd ocodex-managed && ./install.sh
+git clone https://github.com/fortun8te/ocodex-managed && cd ocodex-managed && ./install.sh
 ```
 
 The script copies `SKILL.md`, `SUPERVISOR.md`, and the scripts into

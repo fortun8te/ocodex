@@ -8,7 +8,7 @@ Show HN: I run free OpenRouter agents in parallel and one paid supervisor audits
 
 I've been running coding tasks on free OpenRouter models through the `ocodex` CLI, several workers at a time, and treating them like cheap labor that can't be trusted unsupervised. The repo is the pattern plus the tooling:
 
-https://github.com/OWNER/ocodex-managed
+https://github.com/fortun8te/ocodex-managed
 
 First day of production data, four batches, eleven workers:
 

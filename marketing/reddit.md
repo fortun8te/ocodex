@@ -31,7 +31,7 @@ Tooling is two Python scripts:
 - `launch_batches.py` — takes one manifest with any number of agents, probes your key pool (optional orslot multi-key), injects crash checkpoints into every task, chunks into waves under the concurrency cap.
 
 Repo with full docs and the measured failure modes:
-https://github.com/OWNER/ocodex-managed
+https://github.com/fortun8te/ocodex-managed
 
 Happy to share more details about which tasks worked well (bug hunts and doc sync were great) and which didn't (anything needing real build/test loops — worker sandboxes can't run them).
 
@@ -48,7 +48,7 @@ I built a Claude Code skill that gives me a fleet of free OpenRouter workers plu
 Claude Code subagents cost tokens. Sometimes you just need ten things checked or fixed at once and don't care who does the typing. This skill points cheap free OpenRouter agents at your repo instead, then uses one paid Claude supervisor to make sure nothing bad survives.
 
 Repo (installs as a skill via install.sh):
-https://github.com/OWNER/ocodex-managed
+https://github.com/fortun8te/ocodex-managed
 
 How it fits into a Claude Code workflow:
 
