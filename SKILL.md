@@ -10,7 +10,7 @@ unsupervised. The harness retries empty/crash once, checkpoints as STEP ZERO
 (with a heartbeat every 2 minutes), and writes ledger/stats/result files so
 the supervisor does not reconstruct the run from prose.
 
-Power is not "spawn more workers". Default ~5 concurrent per OpenRouter key.
+Power is not "spawn more workers". Default ~6 concurrent per OpenRouter key.
 `--workers-per-key 8` is allowed (429s hop/backoff, not a crash). Do not
 default to 20. One supervisor is the quality gate. Scale with `orslot add`.
 
@@ -83,7 +83,8 @@ heartbeat, alive/stale/dead/done, API/slot). No LLM required to render it.
 
 ## Bandwidth
 
-Default `--workers-per-key 5` is rate-limit headroom, not a crash ceiling.
+Default `--workers-per-key 6` is rate-limit headroom, not a crash ceiling.
+OpenRouter daily request limits reset every day — yesterday's 429s do not count today.
 Request estimates in the launcher are labeled guesses, not measurements.
 
 ## Toward proper cloud agents (aspiration, not yet)

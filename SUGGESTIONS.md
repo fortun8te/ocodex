@@ -121,5 +121,5 @@ Also in this upgrade (management + observability):
 - `./install.sh` is a real doctor: ocodex, optional orslot, docker, SearXNG
   (`SEARXNG_URL`, default http://127.0.0.1:8080). SearXNG is a real install
   dependency for worker web search.
-- Default `--workers-per-key 5` is rate-limit headroom, not a crash. 8 is
-  allowed; 429s hop/backoff. Do not default to 20.
+- Default `--workers-per-key 6` is rate-limit headroom, not a crash. 8 is
+  allowed; 429s hop/backoff. Do not default to 20. OpenRouter daily request limits reset every day.

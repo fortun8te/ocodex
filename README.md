@@ -11,10 +11,10 @@ task, heartbeats every 2 minutes, retries empty/crash once, and leaves a
 machine-readable ledger so the supervisor does not burn tokens reconstructing
 what happened.
 
-Power is **not** "spawn more workers". Default ceiling is ~5 concurrent
+Power is **not** "spawn more workers". Default ceiling is ~6 concurrent
 workers per OpenRouter key. Scale with more keys (`orslot add`) and better
 packing. `--workers-per-key 8` is allowed (429s backoff/hop). Do not default
-to 20. One supervisor remains the quality gate.
+to 20. One supervisor remains the quality gate. OpenRouter daily limits reset every day.
 
 ## Why a supervisor exists
 
@@ -67,8 +67,8 @@ docker run --name searxng -d -p 8080:8080 searxng/searxng:latest
 
 - An `ocodex` CLI on PATH (Codex CLI pointed at OpenRouter, or any exec-style
   agent that takes a prompt on stdin). Non-standard location: `OCODEX_BIN`.
-- Optional: `orslot` for multi-key pools. Without it, one key, default 5
-  concurrent. 429s hop/backoff; they are not a crash at 6 workers.
+- Optional: `orslot` for multi-key pools. Without it, one key, default 6
+  concurrent. 429s hop/backoff; they are not a crash at 7+ workers.
 
 ## First sample launch
 
@@ -95,8 +95,8 @@ Then spawn **one** supervisor with the printed SUPERVISOR BRIEF
 | `OCODEX_BATCH_OUT` | set by launcher | batch out-dir (checkpoints + result.json) |
 | `OCODEX_KEY_SLOT` | unset | recorded on the slot board when known |
 | `OCODEX_POLL_INTERVAL` | `5` | launcher wait-loop seconds |
-| `--workers-per-key` | **5** | default concurrency per key; override 8–10, not 20 |
-| `--max-workers` | pool-derived | hard cap for this run; exceeding recommended 5/key warns, does not crash |
+| `--workers-per-key` | **6** | default concurrency per key; override 8–10, not 20 |
+| `--max-workers` | pool-derived | hard cap for this run; exceeding recommended 6/key warns, does not crash |
 | `--timeout` | 900 | per-agent seconds |
 
 ## Management CLI
@@ -134,7 +134,7 @@ result.json + stats.jsonl). No LLM.
 | SUBTASK | last named heartbeat sub-task |
 | LAST UPDATE | last checkpoint line |
 | ELAPSED | now − `ledger.json` `started_at` |
-| HEARTBEAT / AGE | last `HEARTBEAT <ISO-Z> | subtask | focus` line |
+| HEARTBEAT / AGE | last `HEARTBEAT <ISO-Z> \| subtask \| focus` line |
 | STATE | `alive` / `retrying` / `STALE` / `dead` / `done` |
 | API/SLOT | model + key slot if recorded |
 
@@ -236,7 +236,7 @@ children; `chunk-N.done` / `all.done` are written on the way down.
 **doctor: MISS searxng.** Start it with the compose file above. Workers
 cannot web-search without it.
 
-**429 at 6 workers.** Not a crash. Default is 5/key for rate-limit headroom.
+**429 at 7+ workers.** Not a crash. Default is 6/key for rate-limit headroom.
 `--workers-per-key 8` is allowed; the counting proxy retries/hops slots.
 
 ## Tests
