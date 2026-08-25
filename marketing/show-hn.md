@@ -34,6 +34,6 @@ Three rules hold the system together:
 
 What I measured that surprised me most wasn't the crash rate — it was that the failure mode isn't crashes, it's confident wrong answers from survivors. Crashes leave checkpoints; confident errors look like clean output. That's why the supervisor reads every diff against source instead of trusting "done" messages.
 
-The runner caps batches at 6 agents, enforces non-overlapping ownership inside the workdir, supports per-agent timeout/model/effort, and has a dry-run mode. The launcher handles arbitrary agent counts via chunking. Everything is two Python scripts and two markdown files; install.sh drops it into Claude Code as a skill.
+The runner is capacity-aware (~5 concurrent per OpenRouter key), enforces non-overlapping ownership inside the workdir, supports per-agent timeout/model/effort, and has a dry-run mode. The launcher handles arbitrary agent counts via chunking. `install.sh` doctors the install (ocodex, docker, SearXNG) and drops it into Claude Code as a skill.
 
 Happy to answer questions about the failure modes, the supervision loop, or where this pattern breaks down.
