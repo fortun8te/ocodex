@@ -35,6 +35,8 @@ def env_for(tmp: Path, **extra: str) -> dict[str, str]:
     env.pop("OCODEX_STATS", None)
     env.pop("OCODEX_SCOUT_PROVIDER", None)
     env.pop("OCODEX_PROVIDER", None)
+    env["OCODEX_STAGGER_SEC"] = "0"
+    env["OCODEX_STARTUP_GRACE_SEC"] = "1"
     env.update(extra)
     return env
 
@@ -137,6 +139,92 @@ class CheckpointTests(unittest.TestCase):
             )
             self.assertTrue(normal.startswith("STEP ZERO"))
             self.assertNotIn("Last checkpoint excerpt:", normal)
+
+    def _restore_env(self, key, old):
+        if old is None:
+            os.environ.pop(key, None)
+        else:
+            os.environ[key] = old
+
+    def test_startup_grace_ignores_seed_until_grace(self):
+        old_grace = os.environ.get("OCODEX_STARTUP_GRACE_SEC")
+        old_hb = os.environ.get("OCODEX_HEARTBEAT_SEC")
+        self.addCleanup(self._restore_env, "OCODEX_STARTUP_GRACE_SEC", old_grace)
+        self.addCleanup(self._restore_env, "OCODEX_HEARTBEAT_SEC", old_hb)
+        os.environ["OCODEX_STARTUP_GRACE_SEC"] = "180"
+        os.environ["OCODEX_HEARTBEAT_SEC"] = "120"
+        with tempfile.TemporaryDirectory() as raw:
+            path = Path(raw) / "a.progress.md"
+            path.write_text(
+                "HEARTBEAT 2026-08-25T16:58:20Z | launched | harness created checkpoint; write analysis before edits\n"
+            )
+            self.assertFalse(harness_lib.is_stale_heartbeat(
+                path, attempt_started=0.0, now=100.0, attempt=1, interval=120,
+            ))
+            self.assertTrue(harness_lib.is_stale_heartbeat(
+                path, attempt_started=0.0, now=200.0, attempt=1, interval=120,
+            ))
+
+    def test_real_heartbeat_uses_interval_not_grace(self):
+        old_grace = os.environ.get("OCODEX_STARTUP_GRACE_SEC")
+        old_hb = os.environ.get("OCODEX_HEARTBEAT_SEC")
+        self.addCleanup(self._restore_env, "OCODEX_STARTUP_GRACE_SEC", old_grace)
+        self.addCleanup(self._restore_env, "OCODEX_HEARTBEAT_SEC", old_hb)
+        os.environ["OCODEX_STARTUP_GRACE_SEC"] = "180"
+        os.environ["OCODEX_HEARTBEAT_SEC"] = "120"
+        with tempfile.TemporaryDirectory() as raw:
+            path = Path(raw) / "a.progress.md"
+            now_wall = datetime(2026, 8, 25, 17, 0, 0, tzinfo=timezone.utc)
+            path.write_text("HEARTBEAT 2026-08-25T16:59:00Z | work | still going\n")
+            self.assertFalse(harness_lib.is_stale_heartbeat(
+                path, attempt_started=0.0, now=100.0, wall_now=now_wall,
+                interval=120, attempt=1,
+            ))
+            path.write_text("HEARTBEAT 2026-08-25T16:57:00Z | work | still going\n")
+            self.assertTrue(harness_lib.is_stale_heartbeat(
+                path, attempt_started=0.0, now=200.0, wall_now=now_wall,
+                interval=120, attempt=1,
+            ))
+
+    def test_retry_attempt_does_not_get_startup_grace(self):
+        old_grace = os.environ.get("OCODEX_STARTUP_GRACE_SEC")
+        old_hb = os.environ.get("OCODEX_HEARTBEAT_SEC")
+        self.addCleanup(self._restore_env, "OCODEX_STARTUP_GRACE_SEC", old_grace)
+        self.addCleanup(self._restore_env, "OCODEX_HEARTBEAT_SEC", old_hb)
+        os.environ["OCODEX_STARTUP_GRACE_SEC"] = "180"
+        os.environ["OCODEX_HEARTBEAT_SEC"] = "120"
+        with tempfile.TemporaryDirectory() as raw:
+            path = Path(raw) / "a.progress.md"
+            path.write_text(
+                "HEARTBEAT 2026-08-25T16:58:20Z | launched | harness created checkpoint; write analysis before edits\n"
+            )
+            self.assertTrue(harness_lib.is_stale_heartbeat(
+                path, attempt_started=0.0, now=130.0, interval=120, attempt=2,
+            ))
+
+    def test_compact_brief_includes_bulk_line(self):
+        brief = harness_lib.compact_brief(
+            {"name": "scout-a", "mode": "scout", "task": "look around", "owns": []},
+            Path("/tmp/work"),
+            checkpoint_out=Path("/tmp/out"),
+            result_path=Path("/tmp/out/scout-a.result.json"),
+        )
+        self.assertIn("BULK:", brief)
+        self.assertIn("3+ mechanical", brief)
+
+    def test_stagger_sec_env(self):
+        old = os.environ.get("OCODEX_STAGGER_SEC")
+        self.addCleanup(self._restore_env, "OCODEX_STAGGER_SEC", old)
+        os.environ.pop("OCODEX_STAGGER_SEC", None)
+        self.assertEqual(harness_lib.stagger_sec(), 2.0)
+        os.environ["OCODEX_STAGGER_SEC"] = "nope"
+        self.assertEqual(harness_lib.stagger_sec(), 2.0)
+        os.environ["OCODEX_STAGGER_SEC"] = ""
+        self.assertEqual(harness_lib.stagger_sec(), 2.0)
+        os.environ["OCODEX_STAGGER_SEC"] = "0"
+        self.assertEqual(harness_lib.stagger_sec(), 0.0)
+        os.environ["OCODEX_STAGGER_SEC"] = "3"
+        self.assertEqual(harness_lib.stagger_sec(), 3.0)
 
 
 class StaleHeartbeatTests(unittest.TestCase):

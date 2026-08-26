@@ -24,12 +24,12 @@ from harness_lib import (
     append_stats,
     classify_error,
     compact_brief,
-    heartbeat_interval_sec,
+    is_stale_heartbeat,
     load_manifest,
     merge_result_json,
     parse_codex_jsonl,
-    progress_is_stale,
     seed_progress_files,
+    stagger_sec,
     utc_now,
     validate_manifest,
     write_json,
@@ -314,9 +314,11 @@ def _run_attempt(
                     return_code = process.returncode if process.returncode is not None else 124
                     timed_out = True
                     break
-                if (
-                    now - started > heartbeat_interval_sec()
-                    and progress_is_stale(progress_path)
+                if is_stale_heartbeat(
+                    progress_path,
+                    attempt_started=started,
+                    now=now,
+                    attempt=attempt,
                 ):
                     terminate(process)
                     return_code = process.returncode if process.returncode is not None else 124
@@ -548,7 +550,12 @@ def main() -> int:
     _install_signal_handlers()
     worker_count = min(args.max_parallel, len(agents))
     with concurrent.futures.ThreadPoolExecutor(max_workers=worker_count) as pool:
-        futures = [pool.submit(run_one, agent, workdir, out_dir, args.model, ocodex_bin) for agent in agents]
+        delay = stagger_sec()
+        futures = []
+        for i, agent in enumerate(agents):
+            if i and delay > 0:
+                time.sleep(delay)
+            futures.append(pool.submit(run_one, agent, workdir, out_dir, args.model, ocodex_bin))
         results = [future.result() for future in futures]
 
     summary = {"out_dir": str(out_dir), "ok": all(item["ok"] for item in results), "agents": results}

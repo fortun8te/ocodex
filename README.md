@@ -108,6 +108,8 @@ Then spawn **one** supervisor with the printed SUPERVISOR BRIEF
 | `OCODEX_KEY_SLOT` | unset | recorded on the slot board when known |
 | `OCODEX_POLL_INTERVAL` | `5` | launcher wait-loop seconds |
 | `OCODEX_HEARTBEAT_SEC` | `120` | kill+retry-once from checkpoint if last HEARTBEAT is older than this |
+| `OCODEX_STARTUP_GRACE_SEC` | `180` | first attempt: a harness-seeded HEARTBEAT is not live; don't stale-kill until this many seconds without a worker HEARTBEAT |
+| `OCODEX_STAGGER_SEC` | `2` | delay between starting workers in a wave; 0 disables |
 | `OCODEX_MIDNIGHT_WINDOW_SEC` | `600` | stop launching this many seconds before UTC midnight; `0` disables |
 | `OCODEX_CAP_REFRESH_SEC` | `30` | re-probe orslot while launching; `0` = every loop tick |
 | `OCODEX_PROVIDERS` | `~/.ocodex/providers.json` | OpenAI-compatible provider table (Groq etc.) |
@@ -255,6 +257,7 @@ Supervisor still checks the result; unfinished work is finished from
 **STALE on the slot board.** Last heartbeat older than 2 minutes. The harness
 kills the worker and auto-retries **once from the checkpoint**. If the retry
 is still stale/fail, `status` is `dead` and the supervisor finishes the task.
+First-attempt seed HEARTBEAT uses startup grace (180s), not the 2-minute interval.
 
 **`refusing to run: all.done already exist` (exit 2).** Stale out-dir. New
 `--out-dir` or delete `*.done`.

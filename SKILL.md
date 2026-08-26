@@ -72,6 +72,8 @@ STALE otherwise. The harness kills a stale worker and auto-retries once from
 the existing checkpoint (does not start over). If the retry is still stale/fail,
 the supervisor treats it as dead and finishes from the checkpoint. The harness
 creates the progress file at launch so a crash still leaves something.
+Workers should script 3+ mechanical file ops (BULK) rather than narrating each
+file; the harness-seeded HEARTBEAT is not theirs — they must write a real one.
 
 ## Supervision
 

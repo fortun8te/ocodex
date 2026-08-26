@@ -16,6 +16,9 @@ MAX_AGENTS = 6
 NAME_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$")
 CHECKPOINT_MARK = "STEP ZERO"
 HEARTBEAT_INTERVAL_SEC = 120
+STAGGER_SEC = 2.0
+STARTUP_GRACE_SEC = 180
+HARNESS_SEED_FOCUS = "harness created checkpoint"
 HEARTBEAT_RE = re.compile(
     r"^(?:-\s*)?HEARTBEAT\s+(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z)\s*\|\s*(.*?)\s*\|\s*(.*)$"
 )
@@ -35,6 +38,31 @@ def heartbeat_interval_sec() -> float:
         except ValueError:
             pass
     return float(HEARTBEAT_INTERVAL_SEC)
+
+
+def stagger_sec() -> float:
+    """Seconds to wait between starting workers in a wave. 0 disables. Default 2."""
+    raw = os.environ.get("OCODEX_STAGGER_SEC")
+    if raw is not None and str(raw).strip() != "":
+        try:
+            value = float(raw)
+            if value >= 0:
+                return value
+        except ValueError:
+            pass
+    return float(STAGGER_SEC)
+
+
+def startup_grace_sec() -> float:
+    raw = os.environ.get("OCODEX_STARTUP_GRACE_SEC")
+    if raw is not None and str(raw).strip() != "":
+        try:
+            value = float(raw)
+            if value >= 0:
+                return value
+        except ValueError:
+            pass
+    return float(STARTUP_GRACE_SEC)
 
 
 SEARXNG_DEFAULT_URL = "http://127.0.0.1:8080"
@@ -209,6 +237,7 @@ def compact_brief(
         f"NAME: {name}",
         f"MODE: {agent['mode']}",
         owns_line,
+        "BULK: if the work is 3+ mechanical file ops, write a short script, run it, append one HEARTBEAT with the result. Do not narrate each file.",
     ])
     if facts_lines:
         parts.append("FACTS (authoritative; do not contradict):")
@@ -780,6 +809,17 @@ def progress_is_stale(path: Path | str, now: datetime | None = None) -> bool:
     return age is None or age > interval
 
 
+def heartbeat_is_harness_seed(path: Path | str) -> bool:
+    """True if the latest HEARTBEAT is still the harness launch seed."""
+    info = parse_progress(Path(path))
+    sub = (info.get("subtask") or "").strip().lower()
+    focus = (info.get("focus") or "").strip().lower()
+    if sub == "launched" and HARNESS_SEED_FOCUS in focus:
+        return True
+    # no heartbeat at all is not a seed; missing is handled by is_stale_heartbeat
+    return False
+
+
 def is_stale_heartbeat(
     progress_path: Path,
     *,
@@ -787,19 +827,29 @@ def is_stale_heartbeat(
     now: float | None = None,
     wall_now: datetime | None = None,
     interval: float | None = None,
+    attempt: int = 1,
 ) -> bool:
-    """True if the attempt has run past `interval` and last HEARTBEAT is older than `interval`.
+    """True if the attempt should be stale-killed.
 
     Attempt duration uses a monotonic clock (`attempt_started` / `now`).
-    Heartbeat age uses wall clock via progress_is_stale. Missing progress /
-    missing HEARTBEAT counts as stale once the attempt itself has outlived
-    the interval (the wait-loop grace period).
+    A harness-seeded HEARTBEAT is not live: first attempt waits
+    startup_grace_sec() (default 180) for a real worker HEARTBEAT.
+    Retry (attempt >= 2) or grace == 0 falls back to the interval.
+    Real worker heartbeats use elapsed > interval AND progress_is_stale.
+    Missing HEARTBEAT is stale once elapsed > interval.
     """
     now = time.monotonic() if now is None else now
     interval = heartbeat_interval_sec() if interval is None else interval
-    if now - attempt_started <= interval:
+    elapsed = now - attempt_started
+    path = Path(progress_path)
+    if heartbeat_is_harness_seed(path):
+        grace = startup_grace_sec()
+        if attempt <= 1 and grace > 0:
+            return elapsed > grace
+        return elapsed > interval
+    if elapsed <= interval:
         return False
-    return progress_is_stale(progress_path, now=wall_now)
+    return progress_is_stale(path, now=wall_now)
 
 
 def _load_stats_by_name(path: Path) -> dict[str, dict[str, Any]]:
