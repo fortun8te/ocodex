@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""OpenAI-compatible provider table. OpenRouter is default; Groq is opt-in via key."""
+"""Provider table. Muse Spark contributor is default; OpenRouter/Groq are fallbacks."""
 from __future__ import annotations
 
 import json
@@ -7,11 +7,26 @@ import os
 from pathlib import Path
 from typing import Any
 
+MUSE_MODEL = "muse-spark-1.2-contributor"
+
 DEFAULT_PROVIDERS: list[dict[str, Any]] = [
+    {
+        "name": "muse",
+        "base_url": "https://api.meta.ai/v1",
+        "key_env": "MODEL_API_KEY",
+        "profile": "muse",
+        "conc_limit": 6,
+        "models": {
+            "cheap": [MUSE_MODEL],
+            "std": [MUSE_MODEL],
+            "max": [MUSE_MODEL],
+        },
+    },
     {
         "name": "openrouter",
         "base_url": "https://openrouter.ai/api/v1",
         "key_env": "OPENROUTER_API_KEY",
+        "profile": "openrouter",
         "conc_limit": 6,
         "models": {
             "cheap": [
@@ -67,10 +82,20 @@ def load_providers(path: Path | str | None = None) -> list[dict[str, Any]]:
     return out or [dict(item) for item in DEFAULT_PROVIDERS]
 
 
-def provider_available(provider: dict[str, Any]) -> bool:
-    env_name = str(provider.get("key_env") or "")
-    if provider.get("name") == "openrouter":
+def muse_auth_present() -> bool:
+    if os.environ.get("MODEL_API_KEY", "").strip():
         return True
+    auth = Path.home() / ".config" / "muse" / "auth.json"
+    return auth.is_file()
+
+
+def provider_available(provider: dict[str, Any]) -> bool:
+    name = str(provider.get("name") or "")
+    if name == "muse":
+        return muse_auth_present()
+    if name == "openrouter":
+        return True
+    env_name = str(provider.get("key_env") or "")
     if not env_name:
         return False
     return bool(os.environ.get(env_name, "").strip())
@@ -95,13 +120,15 @@ def pick_provider(agent: dict[str, Any], providers: list[dict[str, Any]] | None 
     named = find_provider(agent.get("provider"), table)
     if named:
         return named
-    env_default = (os.environ.get("OCODEX_SCOUT_PROVIDER") if agent.get("mode") == "scout" else None) or os.environ.get("OCODEX_PROVIDER")
+    env_default = (
+        os.environ.get("OCODEX_SCOUT_PROVIDER") if agent.get("mode") == "scout" else None
+    ) or os.environ.get("OCODEX_PROVIDER")
     if env_default:
         found = find_provider(env_default, table)
         if found and provider_available(found):
             return found
     for item in table:
-        if item.get("name") == "openrouter":
+        if provider_available(item):
             return item
     return table[0]
 
@@ -111,6 +138,14 @@ def default_tier(agent: dict[str, Any]) -> str:
     if explicit in {"cheap", "std", "max"}:
         return explicit
     return "cheap" if agent.get("mode") == "scout" else "std"
+
+
+def default_effort(agent: dict[str, Any]) -> str:
+    """Scout = low, editor = medium. Interactive `ocodex` stays profile high."""
+    explicit = agent.get("effort")
+    if explicit in {"low", "medium", "high", "xhigh"}:
+        return explicit
+    return "low" if agent.get("mode") == "scout" else "medium"
 
 
 def model_candidates(

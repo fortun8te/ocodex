@@ -5,15 +5,15 @@ description: The ocodex parallel-worker system — cheap external agents with ma
 
 # Ocodex, managed
 
-Cheap OpenRouter-backed workers + one paid supervisor per batch. Never run
+Muse Spark 1.2 contributor workers + one paid supervisor per batch. Never run
 unsupervised. The harness retries empty/crash/stale-heartbeat once from the existing
 checkpoint (does not start over), checkpoints as STEP ZERO (with a heartbeat
 every 2 minutes), and writes ledger/stats/result files so the supervisor
 does not reconstruct the run from prose.
 
-Power is not "spawn more workers". Default ~6 concurrent per OpenRouter key.
-`--workers-per-key 8` is allowed (429s hop/backoff, not a crash). Do not
-default to 20. One supervisor is the quality gate. Scale with `orslot add`.
+Power is not "spawn more workers". Default 6 concurrent (Muse RPM is per team).
+Scouts run `low` reasoning, editors `medium`. Interactive `ocodex` stays
+profile `high`. OpenRouter is the fallback, not the default.
 
 ## The three rules
 

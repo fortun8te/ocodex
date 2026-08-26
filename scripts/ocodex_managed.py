@@ -134,11 +134,21 @@ def cmd_doctor() -> int:
         print("MISS  ocodex     not on PATH. Install it or set OCODEX_BIN.")
         print("      workers cannot launch until this exists.")
 
+    muse_auth = Path.home() / ".config" / "muse" / "auth.json"
+    muse_token = Path.home() / "bin" / "muse-token"
+    if muse_auth.is_file() and muse_token.is_file():
+        print("OK    muse       contributor via ~/bin/muse-token  (default provider)")
+    elif muse_auth.is_file():
+        print("OK    muse       auth.json present  (default provider)")
+    else:
+        print("OPT   muse       no Meta auth — workers fall back to OpenRouter")
+        print("      sign in with `muse login`, then `ocodex` uses --profile muse")
+
     orslot = find_orslot()
     if orslot:
-        print(f"OK    orslot     {orslot}  (multi-key pool)")
+        print(f"OPT   orslot     {orslot}  (OpenRouter fallback pool)")
     else:
-        print("OPT   orslot     not found — 1 key, default 6 concurrent. Scale with `orslot add`.")
+        print("OPT   orslot     not found — OpenRouter fallback is one key")
 
     docker = shutil.which("docker")
     if docker:

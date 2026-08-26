@@ -36,7 +36,7 @@ from harness_lib import (
     validate_manifest,
     write_json,
 )
-from providers import model_candidates, pick_provider, provider_available
+from providers import default_effort, model_candidates, pick_provider, provider_available
 
 
 LIVE_PROCESSES: list[subprocess.Popen] = []
@@ -73,11 +73,20 @@ def find_codex() -> str | None:
 
 
 def resolve_worker_bin(provider: dict | None, ocodex_bin: str) -> tuple[str, dict[str, str], list[str]]:
-    """Non-OpenRouter providers skip the orslot wrapper and talk to `codex` directly."""
+    """Muse uses `ocodex` (`codex --profile muse`). OpenRouter uses `ocodex-openrouter`."""
     extra_env: dict[str, str] = {}
     extra_args: list[str] = []
-    if not provider or provider.get("name", "openrouter") == "openrouter":
+    name = str((provider or {}).get("name") or "muse").lower()
+    extra_env["OCODEX_KEY_SLOT"] = name
+    if name == "muse":
         return ocodex_bin, extra_env, extra_args
+    if name == "openrouter" or not provider:
+        which = shutil.which("ocodex-openrouter")
+        or_bin = Path(which) if which else (Path.home() / "bin" / "ocodex-openrouter")
+        if or_bin.is_file():
+            return str(or_bin), extra_env, extra_args
+        extra_args = ["--profile", "openrouter"]
+        return (find_codex() or ocodex_bin), extra_env, extra_args
     if not provider_available(provider):
         return ocodex_bin, extra_env, extra_args
     codex = find_codex()
@@ -91,7 +100,6 @@ def resolve_worker_bin(provider: dict | None, ocodex_bin: str) -> tuple[str, dic
         "--profile", "openrouter",
         "-c", f"model_providers.openrouter.base_url={provider['base_url']}",
     ]
-    extra_env["OCODEX_KEY_SLOT"] = str(provider.get("name"))
     return codex, extra_env, extra_args
 
 
@@ -154,9 +162,8 @@ def command_for(
     model = default_model if default_model is not None else agent.get("model")
     if model:
         command.extend(["-m", model])
-    effort = agent["effort"] or ("low" if agent["mode"] == "scout" else None)
-    if effort:
-        command.extend(["-c", f'model_reasoning_effort="{effort}"'])
+    effort = default_effort(agent)
+    command.extend(["-c", f'model_reasoning_effort="{effort}"'])
     command.extend([
         "--disable",
         "multi_agent",
@@ -455,7 +462,7 @@ def run_one(
     stats_record = {
         "ts": utc_now(),
         "name": name,
-        "effort": agent.get("effort"),
+        "effort": default_effort(agent),
         "model": current.get("model") or agent.get("model") or default_model,
         "provider": current.get("provider") or (provider.get("name") if provider else None),
         "ok": current["ok"],

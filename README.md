@@ -1,9 +1,10 @@
 # ocodex
 
-A parallel cheap-worker harness: OpenRouter-backed `ocodex` CLI workers fan out
+A parallel cheap-worker harness: Muse Spark 1.2 contributor workers fan out
 on decomposable, cheap-to-verify work; one paid supervisor audits every claim,
 prunes bad fixes, and finishes dead workers. Verification is cheaper than
-generation — that is the whole product.
+generation — that is the whole product. OpenRouter is the fallback
+(`ocodex-openrouter` / `OCODEX_PROVIDER=openrouter`).
 
 Workers are fallible (stream disconnects, confident factual errors). They never
 ship unsupervised. The launcher is capacity-aware, crash-checkpoints every
@@ -11,10 +12,11 @@ task, heartbeats every 2 minutes, retries empty/crash/stale-heartbeat once from 
 checkpoint, and leaves a machine-readable ledger so the supervisor does not
 burn tokens reconstructing what happened.
 
-Power is **not** "spawn more workers". Default ceiling is ~6 concurrent
-workers per OpenRouter key. Scale with more keys (`orslot add`) and better
-packing. `--workers-per-key 8` is allowed (429s backoff/hop). Do not default
-to 20. One supervisor remains the quality gate. OpenRouter daily limits reset every day.
+Power is **not** "spawn more workers". Default ceiling is **6** concurrent
+workers. Muse contributor is 100 RPM / 3M TPM **per team**, so extra API keys
+do not add slots. Scout effort is `low`, editors `medium` (interactive
+`ocodex` stays profile `high`). Do not default to 20. One supervisor remains
+the quality gate.
 
 ## Why a supervisor exists
 

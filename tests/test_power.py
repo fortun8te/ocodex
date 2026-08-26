@@ -120,18 +120,36 @@ class ProviderTests(unittest.TestCase):
         self.assertEqual(cands, ["my/model"])
 
     def test_scout_defaults_cheap(self):
-        cands = providers.model_candidates({"name": "a", "mode": "scout"})
-        self.assertTrue(cands)
-        self.assertIn(":free", cands[0])
+        table = providers.DEFAULT_PROVIDERS
+        with patch.object(providers, "muse_auth_present", return_value=True):
+            cands = providers.model_candidates(
+                {"name": "a", "mode": "scout"}, providers=table,
+            )
+        self.assertEqual(cands[0], providers.MUSE_MODEL)
+
+    def test_default_provider_is_muse(self):
+        table = providers.DEFAULT_PROVIDERS
+        with patch.object(providers, "muse_auth_present", return_value=True):
+            picked = providers.pick_provider({"name": "a", "mode": "scout"}, providers=table)
+        self.assertEqual(picked["name"], "muse")
+
+    def test_effort_split(self):
+        self.assertEqual(providers.default_effort({"mode": "scout"}), "low")
+        self.assertEqual(providers.default_effort({"mode": "worker"}), "medium")
+        self.assertEqual(providers.default_effort({"mode": "worker", "effort": "high"}), "high")
 
     def test_groq_only_when_asked(self):
-        picked = providers.pick_provider({"name": "a", "mode": "scout"})
-        self.assertEqual(picked["name"], "openrouter")
+        table = providers.DEFAULT_PROVIDERS
+        with patch.object(providers, "muse_auth_present", return_value=True):
+            picked = providers.pick_provider({"name": "a", "mode": "scout"}, providers=table)
+            self.assertEqual(picked["name"], "muse")
         old = os.environ.get("OCODEX_SCOUT_PROVIDER")
         os.environ["OCODEX_SCOUT_PROVIDER"] = "groq"
         os.environ["GROQ_API_KEY"] = "gsk-test"
         try:
-            picked = providers.pick_provider({"name": "a", "mode": "scout"})
+            picked = providers.pick_provider(
+                {"name": "a", "mode": "scout"}, providers=table,
+            )
             self.assertEqual(picked["name"], "groq")
         finally:
             if old is None:

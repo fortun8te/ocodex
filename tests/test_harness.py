@@ -23,6 +23,7 @@ FAKE = Path(__file__).resolve().parent / "fake_ocodex.py"
 
 sys.path.insert(0, str(SCRIPTS))
 import harness_lib  # noqa: E402
+import run_agents  # noqa: E402
 
 
 def env_for(tmp: Path, **extra: str) -> dict[str, str]:
@@ -258,6 +259,32 @@ class CheckpointTests(unittest.TestCase):
             bullets = harness_lib.load_learned_bullets(dest)
             self.assertEqual(len(bullets), harness_lib.LEARNED_MAX_BULLETS)
             self.assertTrue(bullets[0].startswith("note-"))
+
+    def test_command_for_pins_muse_effort(self):
+        scout = run_agents.command_for(
+            {"name": "s", "mode": "scout", "owns": [], "effort": None},
+            Path("/tmp/work"),
+            Path("/tmp/out/s.final.txt"),
+            None,
+            "/usr/bin/ocodex",
+        )
+        self.assertIn('model_reasoning_effort="low"', scout)
+        worker = run_agents.command_for(
+            {"name": "w", "mode": "worker", "owns": ["a.py"], "effort": None},
+            Path("/tmp/work"),
+            Path("/tmp/out/w.final.txt"),
+            None,
+            "/usr/bin/ocodex",
+        )
+        self.assertIn('model_reasoning_effort="medium"', worker)
+        high = run_agents.command_for(
+            {"name": "w", "mode": "worker", "owns": ["a.py"], "effort": "high"},
+            Path("/tmp/work"),
+            Path("/tmp/out/w.final.txt"),
+            None,
+            "/usr/bin/ocodex",
+        )
+        self.assertIn('model_reasoning_effort="high"', high)
 
     def test_stagger_sec_env(self):
         old = os.environ.get("OCODEX_STAGGER_SEC")
