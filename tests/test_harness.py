@@ -212,6 +212,53 @@ class CheckpointTests(unittest.TestCase):
         self.assertIn("BULK:", brief)
         self.assertIn("3+ mechanical", brief)
 
+    def test_compact_brief_includes_browser_and_learn(self):
+        old = os.environ.get("OCODEX_LEARNED_PATH")
+        self.addCleanup(self._restore_env, "OCODEX_LEARNED_PATH", old)
+        with tempfile.TemporaryDirectory() as raw:
+            os.environ["OCODEX_LEARNED_PATH"] = str(Path(raw) / "missing.md")
+            brief = harness_lib.compact_brief(
+                {"name": "scout-a", "mode": "scout", "task": "look around", "owns": []},
+                Path("/tmp/work"),
+                checkpoint_out=Path("/tmp/out"),
+                result_path=Path("/tmp/out/scout-a.result.json"),
+            )
+        self.assertIn("BROWSER:", brief)
+        self.assertIn("browser-harness", brief)
+        self.assertIn("LEARN:", brief)
+        self.assertIn("`learned`", brief)
+        self.assertNotIn("LEARNED (do not contradict):", brief)
+
+    def test_compact_brief_injects_learned_notes(self):
+        old = os.environ.get("OCODEX_LEARNED_PATH")
+        self.addCleanup(self._restore_env, "OCODEX_LEARNED_PATH", old)
+        with tempfile.TemporaryDirectory() as raw:
+            dest = Path(raw) / "SKILL.md"
+            dest.write_text("- stale HEARTBEAT is not a live worker\n- Codex hangs if stdin stays open\n")
+            os.environ["OCODEX_LEARNED_PATH"] = str(dest)
+            brief = harness_lib.compact_brief(
+                {"name": "scout-a", "mode": "scout", "task": "look around", "owns": []},
+                Path("/tmp/work"),
+                checkpoint_out=Path("/tmp/out"),
+                result_path=Path("/tmp/out/scout-a.result.json"),
+            )
+        self.assertIn("LEARNED (do not contradict):", brief)
+        self.assertIn("stale HEARTBEAT is not a live worker", brief)
+
+    def test_harvest_learned_dedupes_and_caps(self):
+        with tempfile.TemporaryDirectory() as raw:
+            dest = Path(raw) / "SKILL.md"
+            self.assertEqual(harness_lib.harvest_learned(["first pitfall"], dest=dest), 1)
+            self.assertEqual(harness_lib.harvest_learned(["first pitfall", "FIRST PITFALL"], dest=dest), 0)
+            self.assertEqual(harness_lib.harvest_learned(["second pitfall"], dest=dest), 1)
+            bullets = harness_lib.load_learned_bullets(dest)
+            self.assertEqual(bullets, ["first pitfall", "second pitfall"])
+            many = [f"note-{i}" for i in range(50)]
+            harness_lib.harvest_learned(many, dest=dest)
+            bullets = harness_lib.load_learned_bullets(dest)
+            self.assertEqual(len(bullets), harness_lib.LEARNED_MAX_BULLETS)
+            self.assertTrue(bullets[0].startswith("note-"))
+
     def test_stagger_sec_env(self):
         old = os.environ.get("OCODEX_STAGGER_SEC")
         self.addCleanup(self._restore_env, "OCODEX_STAGGER_SEC", old)

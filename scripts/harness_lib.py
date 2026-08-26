@@ -19,6 +19,19 @@ HEARTBEAT_INTERVAL_SEC = 120
 STAGGER_SEC = 2.0
 STARTUP_GRACE_SEC = 180
 HARNESS_SEED_FOCUS = "harness created checkpoint"
+LEARNED_MAX_BULLETS = 40
+LEARNED_BRIEF_BULLETS = 12
+LEARNED_DEFAULT = Path.home() / ".codex" / "skills" / "ocodex-learned" / "SKILL.md"
+LEARNED_HEADER = '''---
+name: ocodex-learned
+description: Durable pitfalls ocodex workers learned. Read before repeating a failed approach.
+---
+
+# ocodex-learned
+
+Bounded notes (Hermes MEMORY.md steal, no extra review call). Oldest drop after 40 bullets.
+
+'''
 HEARTBEAT_RE = re.compile(
     r"^(?:-\s*)?HEARTBEAT\s+(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z)\s*\|\s*(.*?)\s*\|\s*(.*)$"
 )
@@ -174,6 +187,75 @@ def strip_checkpoint(task: str) -> str:
     return text
 
 
+
+def learned_path() -> Path:
+    """Durable learned-notes file. Override with OCODEX_LEARNED_PATH."""
+    raw = os.environ.get("OCODEX_LEARNED_PATH")
+    if raw is not None and str(raw).strip() != "":
+        return Path(raw).expanduser()
+    return LEARNED_DEFAULT
+
+
+def normalize_learned(raw: Any) -> list[str]:
+    """Coerce result JSON `learned` to unique one-liners."""
+    if raw is None:
+        return []
+    if isinstance(raw, str):
+        items = [raw]
+    elif isinstance(raw, list):
+        items = raw
+    else:
+        return []
+    out: list[str] = []
+    seen: set[str] = set()
+    for item in items:
+        text = " ".join(str(item).split())
+        if not text:
+            continue
+        key = text.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(text)
+    return out
+
+
+def load_learned_bullets(path: Path | None = None) -> list[str]:
+    target = path or learned_path()
+    if not target.exists():
+        return []
+    try:
+        lines = target.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return []
+    bullets: list[str] = []
+    for line in lines:
+        stripped = line.strip()
+        if stripped.startswith("- "):
+            bullets.append(stripped[2:].strip())
+    return bullets
+
+
+def harvest_learned(learned: Any, *, dest: Path | None = None) -> int:
+    """Append unique one-liners to the learned skill. Returns how many were new."""
+    incoming = normalize_learned(learned)
+    if not incoming:
+        return 0
+    target = dest or learned_path()
+    existing = load_learned_bullets(target)
+    have = {item.lower() for item in existing}
+    added = [item for item in incoming if item.lower() not in have]
+    if not added:
+        return 0
+    bullets = existing + added
+    if len(bullets) > LEARNED_MAX_BULLETS:
+        bullets = bullets[-LEARNED_MAX_BULLETS:]
+    target.parent.mkdir(parents=True, exist_ok=True)
+    body = LEARNED_HEADER + "\n".join(f"- {item}" for item in bullets) + "\n"
+    target.write_text(body, encoding="utf-8")
+    return len(added)
+
+
 CLAIMS_BLURB = (
     "CLAIMS: one line each:\n"
     'CLAIM | C or I | short claim | path:line | "quoted snippet"\n'
@@ -184,7 +266,7 @@ CLAIMS_BLURB = (
 def result_contract_blurb(result_path: Path | str) -> str:
     return (
         f"OUTPUT: write `{result_path}` JSON keys "
-        "status, files_touched, claims, failed_scenarios.\n"
+        "status, files_touched, claims, failed_scenarios, learned.\n"
         + CLAIMS_BLURB
     )
 
@@ -238,7 +320,13 @@ def compact_brief(
         f"MODE: {agent['mode']}",
         owns_line,
         "BULK: if the work is 3+ mechanical file ops, write a short script, run it, append one HEARTBEAT with the result. Do not narrate each file.",
+        "BROWSER: live page (click, session, JS) → browser-harness or the chrome plugin. Public docs stay curl. Don't spawn extra Chromes.",
+        "LEARN: reusable pitfall → result JSON key `learned` (list of one-liners). Don't write files outside OWNS for this.",
     ])
+    learned_notes = load_learned_bullets()
+    if learned_notes:
+        parts.append("LEARNED (do not contradict):")
+        parts.extend(f"- {line}" for line in learned_notes[-LEARNED_BRIEF_BULLETS:])
     if facts_lines:
         parts.append("FACTS (authoritative; do not contradict):")
         parts.extend(f"- {line}" for line in facts_lines)
@@ -535,7 +623,7 @@ def merge_result_json(
         except (OSError, json.JSONDecodeError):
             existing = None
         if isinstance(existing, dict):
-            for key in ("status", "files_touched", "claims", "failed_scenarios"):
+            for key in ("status", "files_touched", "claims", "failed_scenarios", "learned"):
                 if key in existing and existing[key] not in (None, [], ""):
                     payload[key] = existing[key]
             if result.get("ok") is False:

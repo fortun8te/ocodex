@@ -110,6 +110,7 @@ Then spawn **one** supervisor with the printed SUPERVISOR BRIEF
 | `OCODEX_HEARTBEAT_SEC` | `120` | kill+retry-once from checkpoint if last HEARTBEAT is older than this |
 | `OCODEX_STARTUP_GRACE_SEC` | `180` | first attempt: a harness-seeded HEARTBEAT is not live; don't stale-kill until this many seconds without a worker HEARTBEAT |
 | `OCODEX_STAGGER_SEC` | `2` | delay between starting workers in a wave; 0 disables |
+| `OCODEX_LEARNED_PATH` | `~/.codex/skills/ocodex-learned/SKILL.md` | bounded worker pitfalls (Hermes MEMORY.md steal). Next briefs get the last 12 |
 | `OCODEX_MIDNIGHT_WINDOW_SEC` | `600` | stop launching this many seconds before UTC midnight; `0` disables |
 | `OCODEX_CAP_REFRESH_SEC` | `30` | re-probe orslot while launching; `0` = every loop tick |
 | `OCODEX_PROVIDERS` | `~/.ocodex/providers.json` | OpenAI-compatible provider table (Groq etc.) |

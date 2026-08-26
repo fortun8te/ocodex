@@ -26,7 +26,9 @@ from harness_lib import (
     compact_brief,
     is_stale_heartbeat,
     load_manifest,
+    harvest_learned,
     merge_result_json,
+    normalize_learned,
     parse_codex_jsonl,
     seed_progress_files,
     stagger_sec,
@@ -483,6 +485,11 @@ def run_one(
         merged["claims_parsed"] = parsed_claims
         merged["schema_compliant"] = True
         result_path.write_text(json.dumps(merged, indent=2) + "\n", encoding="utf-8")
+    learned = normalize_learned(merged.get("learned"))
+    if learned:
+        merged["learned"] = learned
+        result_path.write_text(json.dumps(merged, indent=2) + "\n", encoding="utf-8")
+        harvest_learned(learned)
     current["result_file"] = str(result_path)
     return current
 

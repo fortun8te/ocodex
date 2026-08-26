@@ -74,6 +74,11 @@ the supervisor treats it as dead and finishes from the checkpoint. The harness
 creates the progress file at launch so a crash still leaves something.
 Workers should script 3+ mechanical file ops (BULK) rather than narrating each
 file; the harness-seeded HEARTBEAT is not theirs — they must write a real one.
+Live pages go through browser-harness (or the chrome plugin). Do not attach
+Hermes chrome-devtools to every worker — that would spawn one Chrome per slot.
+Reusable pitfalls go in result JSON `learned`; the harness appends them to
+`~/.codex/skills/ocodex-learned/SKILL.md` (Hermes MEMORY.md, without the extra
+background-review model call) and injects the last 12 into the next brief.
 
 ## Supervision
 
